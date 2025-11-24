@@ -28,6 +28,7 @@ COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY frontend/start-nginx.sh /start-nginx.sh
 RUN chmod +x /start-nginx.sh
 
+# Expose port (Railway will set PORT env var, default to 80)
 EXPOSE 80
 
 # Use startup script to inject environment variables
