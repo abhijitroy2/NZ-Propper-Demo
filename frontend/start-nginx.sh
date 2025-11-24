@@ -16,8 +16,10 @@ echo "BACKEND_URL: $BACKEND_URL"
 BACKEND_URL=$(echo "$BACKEND_URL" | sed 's|/$||')
 
 # Update nginx to listen on PORT env var (Railway requirement)
+# Bind to all interfaces (0.0.0.0) to ensure Railway can connect
 sed -i "s/listen 80;/listen $PORT;/g" /etc/nginx/conf.d/default.conf
-echo "Updated nginx to listen on port $PORT"
+sed -i "s/listen \[::\]:80;/listen [::]:$PORT;/g" /etc/nginx/conf.d/default.conf
+echo "Updated nginx to listen on port $PORT (IPv4 and IPv6)"
 
 # Use sed to replace the ${BACKEND_URL} placeholder
 # Escape special characters in the URL for sed
