@@ -32,9 +32,8 @@ RUN apt-get update && apt-get install -y \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
+# Install Playwright browsers (deps already installed above)
 RUN playwright install chromium
-RUN playwright install-deps chromium
 
 # Copy application code (build context is repo root, Dockerfile is in backend/)
 COPY backend/app/ ./app/
