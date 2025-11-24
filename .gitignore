@@ -53,6 +53,8 @@ Thumbs.db
 # Logs
 *.log
 logs/
+# But keep log directory structure
+!logs/.gitkeep
 
 # Uploads
 uploads/
@@ -62,3 +64,10 @@ uploads/
 
 # Railway
 .railway/
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/

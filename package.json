@@ -1,0 +1,22 @@
+{
+  "name": "nz-propper",
+  "version": "1.0.0",
+  "description": "A web application for analyzing property flip opportunities in New Zealand. Upload CSV or Excel files containing property listings, and the app will calculate potential profit, identify good deals, and highlight stress sales.",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abhijitroy2/NZ-PROPPER.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/abhijitroy2/NZ-PROPPER/issues"
+  },
+  "homepage": "https://github.com/abhijitroy2/NZ-PROPPER#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "@types/node": "^24.10.1"
+  }
+}

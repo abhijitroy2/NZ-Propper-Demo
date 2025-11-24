@@ -3,11 +3,53 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from typing import List
 import io
+import logging
+import atexit
+import sys
+import asyncio
+from pathlib import Path
+
+# Fix Windows asyncio subprocess issue for Playwright
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from .models import ProcessResponse, CalculationResult
 from .utils.file_parser import parse_file
 from .utils.duplicate_handler import remove_duplicates
+from .utils.property_scraper import get_scraper
 from .calculator import FlipCalculator
+
+# Configure logging to file and console
+log_dir = Path(__file__).parent.parent / "logs"
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / "app.log"
+
+# Create file handler with immediate flushing
+file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+# Force immediate flushing to disk
+file_handler.stream.reconfigure(line_buffering=True)
+
+# Create console handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+))
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+logger = logging.getLogger(__name__)
+logger.info(f"Logging to file: {log_file.absolute()}")
 
 app = FastAPI(title="NZ PROPPER - Property Flip Calculator", version="1.0.0")
 
@@ -65,10 +107,10 @@ async def calculate_properties(file: UploadFile = File(...)):
         # Remove duplicates
         deduplicated, duplicates_removed = remove_duplicates(properties)
         
-        # Calculate for each property
+        # Calculate for each property (using async version for web scraping support)
         results: List[CalculationResult] = []
         for prop in deduplicated:
-            result = FlipCalculator.calculate(prop)
+            result = await FlipCalculator.calculate_async(prop)
             results.append(result)
         
         # Calculate summary stats
@@ -88,6 +130,21 @@ async def calculate_properties(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
+# Cleanup browser on shutdown
+@atexit.register
+def cleanup_scraper():
+    """Cleanup browser instance on application shutdown"""
+    scraper = get_scraper()
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(scraper.close())
+        else:
+            loop.run_until_complete(scraper.close())
+    except Exception as e:
+        logger.warning(f"Error cleaning up scraper: {e}")
 
 if __name__ == "__main__":
     import uvicorn
