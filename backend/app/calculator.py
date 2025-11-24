@@ -1,9 +1,10 @@
 import re
 import asyncio
 import logging
-from typing import Dict, Any, Optional
+import statistics
+from typing import Dict, Any, Optional, Tuple
 from .models import CalculationResult, PropertyInput
-from .utils.property_scraper import scrape_property_estimate
+from .utils.property_scraper import scrape_property_estimate, scrape_sold_properties, get_scraper
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,93 @@ class FlipCalculator:
         return any(keyword in title_lower for keyword in FlipCalculator.STRESS_KEYWORDS)
     
     @staticmethod
+    async def get_potential_sale_price_async(property_link: Optional[str], potential_purchase_price: float) -> float:
+        """
+        Get potential sale price by scraping sold properties.
+        Returns median of filtered sold prices, or DEFAULT_SALE_PRICE if scraping fails.
+        """
+        if not property_link:
+            logger.info(f"[CALCULATOR] No Property Link, using DEFAULT_SALE_PRICE: ${FlipCalculator.DEFAULT_SALE_PRICE:,.0f}")
+            return FlipCalculator.DEFAULT_SALE_PRICE
+        
+        try:
+            scraper = get_scraper()
+            
+            # First, get HomesEstimate range for filtering
+            logger.info(f"[CALCULATOR] Getting HomesEstimate range for filtering...")
+            
+            # Use scraper's browser to get HomesEstimate range
+            browser = await scraper._get_browser()
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = None
+            upper_quartile = None
+            
+            try:
+                page = await context.new_page()
+                await page.goto(property_link, wait_until='load', timeout=60000)
+                await asyncio.sleep(2)
+                page_text = await page.text_content('body') or ''
+                
+                # Extract HomesEstimate range
+                estimate_range = scraper._extract_homes_estimate_range(page_text)
+                
+                if estimate_range:
+                    low, high = estimate_range
+                    upper_quartile = high  # Upper quartile is the high end of the range
+                    logger.info(f"[CALCULATOR] HomesEstimate range: ${low:,.0f} - ${high:,.0f}, upper quartile: ${upper_quartile:,.0f}")
+                else:
+                    logger.warning(f"[CALCULATOR] Could not extract HomesEstimate range, will not filter sold prices")
+                
+            except Exception as e:
+                logger.warning(f"[CALCULATOR] Error getting HomesEstimate range: {e}")
+            finally:
+                if page:
+                    await page.close()
+                await context.close()
+            
+            # Scrape sold properties
+            logger.info(f"[CALCULATOR] Scraping sold properties from {property_link}...")
+            sold_prices = await scrape_sold_properties(property_link)
+            
+            if not sold_prices:
+                logger.warning(f"[CALCULATOR] No sold properties found, using DEFAULT_SALE_PRICE")
+                return FlipCalculator.DEFAULT_SALE_PRICE
+            
+            logger.info(f"[CALCULATOR] Found {len(sold_prices)} sold properties")
+            
+            # Filter sold prices: remove any > (upper_quartile * 1.25)
+            filtered_prices = sold_prices
+            if upper_quartile:
+                filter_threshold = upper_quartile * 1.25
+                filtered_prices = [p for p in sold_prices if p <= filter_threshold]
+                removed_count = len(sold_prices) - len(filtered_prices)
+                logger.info(f"[CALCULATOR] Filtered out {removed_count} prices > ${filter_threshold:,.0f} (25% above upper quartile)")
+                logger.info(f"[CALCULATOR] Remaining prices after filtering: {len(filtered_prices)}")
+            
+            if not filtered_prices:
+                logger.warning(f"[CALCULATOR] All sold prices filtered out, using DEFAULT_SALE_PRICE")
+                return FlipCalculator.DEFAULT_SALE_PRICE
+            
+            # Calculate median
+            median_price = statistics.median(filtered_prices)
+            logger.info(f"[CALCULATOR] Median of filtered sold prices: ${median_price:,.0f}")
+            
+            # Validate: if median < potential_purchase_price, use DEFAULT_SALE_PRICE
+            if median_price < potential_purchase_price:
+                logger.warning(f"[CALCULATOR] Median (${median_price:,.0f}) < Purchase Price (${potential_purchase_price:,.0f}), using DEFAULT_SALE_PRICE")
+                return FlipCalculator.DEFAULT_SALE_PRICE
+            
+            logger.info(f"[CALCULATOR] SUCCESS: Using scraped median as Potential Sale Price: ${median_price:,.0f}")
+            return median_price
+                
+        except Exception as e:
+            logger.error(f"[CALCULATOR] Failed to scrape sold properties: {e}", exc_info=True)
+            return FlipCalculator.DEFAULT_SALE_PRICE
+    
+    @staticmethod
     async def calculate_async(property_data: Dict[str, Any]) -> CalculationResult:
         """
         Calculate all values for a property (async version with web scraping support).
@@ -180,10 +268,12 @@ class FlipCalculator:
         property_link = property_data.get("Property Link", "")
         potential_purchase_price = await FlipCalculator.get_potential_purchase_price_async(price_str, property_link)
         
+        # Get potential sale price from sold properties scraping
+        potential_sale_price = await FlipCalculator.get_potential_sale_price_async(property_link, potential_purchase_price)
+        
         # Calculate components
         renovation_budget = potential_purchase_price * FlipCalculator.RENOVATION_PERCENTAGE
         holding_costs = potential_purchase_price * FlipCalculator.HOLDING_COSTS_PERCENTAGE
-        potential_sale_price = FlipCalculator.DEFAULT_SALE_PRICE
         disposal_costs = potential_sale_price * FlipCalculator.DISPOSAL_COSTS_PERCENTAGE
         contingency = renovation_budget * FlipCalculator.CONTINGENCY_PERCENTAGE
         

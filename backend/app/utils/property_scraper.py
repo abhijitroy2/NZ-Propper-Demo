@@ -200,6 +200,74 @@ class PropertyScraper:
         
         return None
     
+    def _extract_homes_estimate_range(self, text: str) -> Optional[Tuple[float, float]]:
+        """
+        Extract HomesEstimate range and return (low, high) tuple.
+        Returns None if not found.
+        """
+        try:
+            # Look for HomesEstimate pattern
+            patterns = [
+                (r'HomesEstimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'HomesEstimate pattern'),
+                (r'Property estimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Property estimate pattern'),
+            ]
+            
+            def parse_value(value_str: str, suffix: str) -> float:
+                value = float(value_str.replace(',', ''))
+                if suffix.upper() == 'K':
+                    value *= 1000
+                elif suffix.upper() == 'M':
+                    value *= 1000000
+                return value
+            
+            for pattern, pattern_name in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    val1_str, suffix1, val2_str, suffix2 = match.groups()
+                    val1 = parse_value(val1_str, suffix1)
+                    val2 = parse_value(val2_str, suffix2)
+                    # Return (low, high) ensuring low < high
+                    return (min(val1, val2), max(val1, val2))
+            
+        except Exception as e:
+            logger.warning(f"Error extracting HomesEstimate range: {e}")
+        
+        return None
+    
+    def _parse_sold_price(self, text: str) -> Optional[float]:
+        """
+        Parse sold price from text like "SOLD: $1,350,000" or "$722,000".
+        Returns price as float or None if not found.
+        """
+        try:
+            # Pattern to match: "SOLD: $1,350,000" or "$722,000" or "$1.35M"
+            patterns = [
+                (r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'SOLD prefix pattern'),
+                (r'\$\s*([\d,]+)\s*([KMkm]?)', 'Dollar amount pattern'),
+            ]
+            
+            def parse_value(value_str: str, suffix: str) -> float:
+                value = float(value_str.replace(',', ''))
+                if suffix.upper() == 'K':
+                    value *= 1000
+                elif suffix.upper() == 'M':
+                    value *= 1000000
+                return value
+            
+            for pattern, pattern_name in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    value_str, suffix = match.groups()
+                    price = parse_value(value_str, suffix)
+                    # Validate it's a reasonable price (>= 1000)
+                    if price >= 1000:
+                        return price
+            
+        except Exception as e:
+            logger.debug(f"Error parsing sold price from '{text}': {e}")
+        
+        return None
+    
     async def _slow_scroll(self, page: Page):
         """Slowly scroll down the page to load all elements"""
         try:
@@ -568,6 +636,298 @@ class PropertyScraper:
             logger.error(f"[SCRAPER] Final failure after retry for {property_link}")
             return None
     
+    def _scrape_sold_properties_sync(self, property_link: str) -> list[float]:
+        """
+        Synchronous version of scraping sold properties for Windows (runs in thread pool).
+        Scrapes "Nearby Sold Properties" section and collects all sold prices.
+        """
+        from playwright.sync_api import sync_playwright, TimeoutError as SyncPlaywrightTimeoutError
+        import time
+        
+        sold_prices = []
+        
+        try:
+            logger.info(f"[SCRAPER SYNC] Starting sold properties scrape for: {property_link}")
+            
+            # Use sync Playwright
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            
+            try:
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = context.new_page()
+                
+                try:
+                    # Navigate to property page
+                    logger.info(f"[SCRAPER SYNC] Navigating to {property_link}...")
+                    try:
+                        page.goto(property_link, wait_until='load', timeout=60000)
+                        logger.info(f"[SCRAPER SYNC] Page loaded: {page.url}")
+                    except Exception as load_error:
+                        logger.warning(f"[SCRAPER SYNC] Load timeout, trying domcontentloaded: {load_error}")
+                        page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Wait for dynamic content
+                    time.sleep(2)
+                    
+                    # Scroll to find "Nearby Sold Properties" section
+                    logger.info(f"[SCRAPER SYNC] Searching for 'Nearby Sold Properties' section...")
+                    page_text = page.text_content('body') or ''
+                    
+                    if 'Nearby Sold Properties' not in page_text and 'nearby sold' not in page_text.lower():
+                        logger.warning(f"[SCRAPER SYNC] 'Nearby Sold Properties' section not found on page")
+                        return sold_prices
+                    
+                    # Scroll to the section
+                    logger.info(f"[SCRAPER SYNC] Scrolling to 'Nearby Sold Properties' section...")
+                    page.evaluate("""
+                        const elements = Array.from(document.querySelectorAll('*'));
+                        const soldSection = elements.find(el => 
+                            el.textContent && (
+                                el.textContent.includes('Nearby Sold Properties') || 
+                                el.textContent.includes('nearby sold')
+                            )
+                        );
+                        if (soldSection) {
+                            soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    """)
+                    time.sleep(2)
+                    
+                    # Find and click '>' button repeatedly to paginate
+                    max_clicks = 50  # Safety limit
+                    click_count = 0
+                    
+                    while click_count < max_clicks:
+                        # Extract sold prices from current view
+                        page_html = page.content()
+                        
+                        # Extract all sold prices from page text
+                        # Look for patterns like "SOLD: $1,350,000" or "$722,000"
+                        sold_patterns = [
+                            r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
+                        ]
+                        
+                        for pattern in sold_patterns:
+                            matches = re.finditer(pattern, page_html, re.IGNORECASE)
+                            for match in matches:
+                                value_str = match.group(1)
+                                suffix = match.group(2) if len(match.groups()) > 1 else ''
+                                try:
+                                    price = float(value_str.replace(',', ''))
+                                    if suffix.upper() == 'K':
+                                        price *= 1000
+                                    elif suffix.upper() == 'M':
+                                        price *= 1000000
+                                    if price >= 1000 and price not in sold_prices:
+                                        sold_prices.append(price)
+                                        logger.debug(f"[SCRAPER SYNC] Found sold price: ${price:,.0f}")
+                                except (ValueError, IndexError):
+                                    continue
+                        
+                        # Try to find and click '>' button
+                        next_button = None
+                        selectors = [
+                            'button[aria-label*="next" i]',
+                            'button[aria-label*=">" i]',
+                            'button:has-text(">")',
+                            '[class*="next"]',
+                            '[class*="arrow-right"]',
+                            'button >> text=">"',
+                        ]
+                        
+                        for selector in selectors:
+                            try:
+                                next_button = page.query_selector(selector)
+                                if next_button:
+                                    # Check if button is disabled
+                                    is_disabled = next_button.get_attribute('disabled') or \
+                                                next_button.get_attribute('aria-disabled') == 'true' or \
+                                                'disabled' in (next_button.get_attribute('class') or '')
+                                    if is_disabled:
+                                        logger.info(f"[SCRAPER SYNC] Next button is disabled, stopping pagination")
+                                        next_button = None
+                                        break
+                                    break
+                            except Exception:
+                                continue
+                        
+                        if not next_button:
+                            logger.info(f"[SCRAPER SYNC] No next button found, stopping pagination")
+                            break
+                        
+                        # Click next button
+                        try:
+                            logger.info(f"[SCRAPER SYNC] Clicking next button (click {click_count + 1})...")
+                            next_button.click()
+                            time.sleep(2)  # Wait for new content to load
+                            click_count += 1
+                        except Exception as e:
+                            logger.warning(f"[SCRAPER SYNC] Failed to click next button: {e}")
+                            break
+                    
+                    logger.info(f"[SCRAPER SYNC] Collected {len(sold_prices)} sold prices after {click_count} pagination clicks")
+                    
+                finally:
+                    page.close()
+                    context.close()
+            finally:
+                browser.close()
+                playwright.stop()
+                
+        except Exception as e:
+            logger.error(f"[SCRAPER SYNC] Error scraping sold properties: {e}", exc_info=True)
+        
+        return sold_prices
+    
+    async def scrape_sold_properties(self, property_link: str) -> list[float]:
+        """
+        Scrape sold properties from "Nearby Sold Properties" section.
+        Returns list of sold prices (floats).
+        """
+        if not property_link:
+            return []
+        
+        logger.info(f"[SCRAPER] Starting sold properties scrape for: {property_link}")
+        
+        # On Windows, use sync API in thread pool
+        if sys.platform == 'win32':
+            logger.info(f"[SCRAPER] Using sync Playwright API in thread pool (Windows workaround)")
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+            
+            loop = asyncio.get_event_loop()
+            try:
+                sold_prices = await loop.run_in_executor(
+                    self._executor, self._scrape_sold_properties_sync, property_link
+                )
+                return sold_prices
+            except Exception as e:
+                logger.error(f"[SCRAPER] Error in thread pool execution: {e}", exc_info=True)
+                return []
+        
+        # Non-Windows: use async API
+        sold_prices = []
+        try:
+            browser = await self._get_browser()
+            context = await browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                viewport={'width': 1920, 'height': 1080}
+            )
+            page = await context.new_page()
+            
+            try:
+                # Navigate
+                logger.info(f"[SCRAPER] Navigating to {property_link}...")
+                try:
+                    await page.goto(property_link, wait_until='load', timeout=60000)
+                except Exception:
+                    await page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
+                
+                await asyncio.sleep(2)
+                
+                # Find "Nearby Sold Properties" section
+                page_text = await page.text_content('body') or ''
+                if 'Nearby Sold Properties' not in page_text and 'nearby sold' not in page_text.lower():
+                    logger.warning(f"[SCRAPER] 'Nearby Sold Properties' section not found")
+                    return sold_prices
+                
+                # Scroll to section
+                await page.evaluate("""
+                    const elements = Array.from(document.querySelectorAll('*'));
+                    const soldSection = elements.find(el => 
+                        el.textContent && (
+                            el.textContent.includes('Nearby Sold Properties') || 
+                            el.textContent.includes('nearby sold')
+                        )
+                    );
+                    if (soldSection) {
+                        soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }
+                """)
+                await asyncio.sleep(2)
+                
+                # Paginate and collect prices
+                max_clicks = 50
+                click_count = 0
+                
+                while click_count < max_clicks:
+                    # Extract prices from current view
+                    page_html = await page.content()
+                    sold_patterns = [
+                        r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)',
+                        r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
+                    ]
+                    
+                    for pattern in sold_patterns:
+                        matches = re.finditer(pattern, page_html, re.IGNORECASE)
+                        for match in matches:
+                            value_str = match.group(1)
+                            suffix = match.group(2) if len(match.groups()) > 1 else ''
+                            try:
+                                price = float(value_str.replace(',', ''))
+                                if suffix.upper() == 'K':
+                                    price *= 1000
+                                elif suffix.upper() == 'M':
+                                    price *= 1000000
+                                if price >= 1000 and price not in sold_prices:
+                                    sold_prices.append(price)
+                            except (ValueError, IndexError):
+                                continue
+                    
+                    # Find next button
+                    next_button = None
+                    selectors = [
+                        'button[aria-label*="next" i]',
+                        'button[aria-label*=">" i]',
+                        'button:has-text(">")',
+                        '[class*="next"]',
+                        '[class*="arrow-right"]',
+                    ]
+                    
+                    for selector in selectors:
+                        try:
+                            next_button = await page.query_selector(selector)
+                            if next_button:
+                                is_disabled = await next_button.get_attribute('disabled') or \
+                                            await next_button.get_attribute('aria-disabled') == 'true'
+                                if is_disabled:
+                                    next_button = None
+                                    break
+                                break
+                        except Exception:
+                            continue
+                    
+                    if not next_button:
+                        break
+                    
+                    # Click next
+                    try:
+                        await next_button.click()
+                        await asyncio.sleep(2)
+                        click_count += 1
+                    except Exception as e:
+                        logger.warning(f"[SCRAPER] Failed to click next: {e}")
+                        break
+                
+                logger.info(f"[SCRAPER] Collected {len(sold_prices)} sold prices")
+                
+            finally:
+                await page.close()
+                await context.close()
+                
+        except Exception as e:
+            logger.error(f"[SCRAPER] Error scraping sold properties: {e}", exc_info=True)
+        
+        return sold_prices
+    
     async def close(self):
         """Close browser instance"""
         if self.browser:
@@ -612,4 +972,14 @@ async def scrape_property_estimate(property_link: str) -> Optional[float]:
     _scraper_file_handler.flush()
     scraper = get_scraper()
     return await scraper.scrape_homes_estimate(property_link)
+
+async def scrape_sold_properties(property_link: str) -> list[float]:
+    """
+    Convenience function to scrape sold properties.
+    Returns list of sold prices from "Nearby Sold Properties" section.
+    """
+    logger.info(f"[SCRAPER] scrape_sold_properties called for: {property_link}")
+    _scraper_file_handler.flush()
+    scraper = get_scraper()
+    return await scraper.scrape_sold_properties(property_link)
 
