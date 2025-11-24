@@ -4,6 +4,7 @@ import random
 import logging
 import os
 import sys
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Tuple
@@ -28,6 +29,7 @@ if sys.platform == 'win32':
 log_dir = Path(__file__).parent.parent.parent / "logs"
 log_dir.mkdir(exist_ok=True)
 log_file = log_dir / "scraper.log"
+cache_file = log_dir / "scraper_cache.json"
 
 # Create file handler with immediate flushing
 file_handler = logging.FileHandler(log_file, encoding='utf-8', mode='a')
@@ -85,6 +87,51 @@ class PropertyScraper:
         self.max_delay_seconds = 5
         self._executor: Optional[ThreadPoolExecutor] = None
         self._playwright_instance = None
+        self._cache_file = cache_file
+        # Load cache from file on initialization
+        self._load_cache()
+    
+    def _load_cache(self):
+        """Load cache from JSON file"""
+        try:
+            if self._cache_file.exists():
+                with open(self._cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    # Convert timestamp strings back to datetime objects
+                    for key, value in cache_data.items():
+                        if isinstance(value, (list, tuple)) and len(value) == 2:
+                            estimate_value, timestamp_str = value
+                            try:
+                                timestamp = datetime.fromisoformat(timestamp_str)
+                                self.cache[key] = (float(estimate_value), timestamp)
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"[SCRAPER] Failed to parse cache entry for {key}: {e}")
+                                continue
+                logger.info(f"[SCRAPER] Loaded {len(self.cache)} entries from cache file: {self._cache_file}")
+            else:
+                logger.info(f"[SCRAPER] No cache file found at {self._cache_file}, starting with empty cache")
+        except Exception as e:
+            logger.error(f"[SCRAPER] Failed to load cache from file: {e}", exc_info=True)
+            self.cache = {}  # Start with empty cache on error
+    
+    def _save_cache(self):
+        """Save cache to JSON file"""
+        try:
+            # Convert datetime objects to ISO format strings for JSON serialization
+            cache_data = {}
+            for key, (estimate_value, timestamp) in self.cache.items():
+                cache_data[key] = [estimate_value, timestamp.isoformat()]
+            
+            # Write to temporary file first, then rename (atomic operation)
+            temp_file = self._cache_file.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2)
+            
+            # Atomic rename
+            temp_file.replace(self._cache_file)
+            logger.debug(f"[SCRAPER] Saved {len(self.cache)} entries to cache file")
+        except Exception as e:
+            logger.error(f"[SCRAPER] Failed to save cache to file: {e}", exc_info=True)
     
     async def _get_browser(self) -> Browser:
         """Get or create browser instance"""
@@ -285,6 +332,7 @@ class PropertyScraper:
                     if estimate_value:
                         self.cache[property_link] = (estimate_value, datetime.now())
                         logger.info(f"[SCRAPER SYNC] Cached: ${estimate_value:,.0f}")
+                        self._save_cache()  # Persist cache to file
                         return estimate_value
                     else:
                         logger.warning(f"[SCRAPER SYNC] No estimate found for {property_link}")
@@ -486,6 +534,7 @@ class PropertyScraper:
                     # Cache the result
                     self.cache[property_link] = (estimate_value, datetime.now())
                     logger.info(f"[SCRAPER] Cached estimate for {property_link}: ${estimate_value:,.0f}")
+                    self._save_cache()  # Persist cache to file
                     _scraper_file_handler.flush()
                     return estimate_value
                 else:
