@@ -4,15 +4,25 @@ import random
 import logging
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Tuple
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
 
 # Fix Windows asyncio subprocess issue
+# Note: In Python 3.12+, Windows event loops should support subprocess by default
 if sys.platform == 'win32':
-    # Use SelectorEventLoop on Windows to support subprocess creation
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # Set event loop policy (deprecated in 3.12+ but may still be needed)
+    try:
+        # Try ProactorEventLoop first (better subprocess support)
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except AttributeError:
+        try:
+            # Fallback to SelectorEventLoop
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except AttributeError:
+            pass  # Use default policy in Python 3.12+
 
 # Configure detailed logging for scraper - write to file and console
 log_dir = Path(__file__).parent.parent.parent / "logs"
@@ -73,12 +83,15 @@ class PropertyScraper:
         self.last_request_time: Optional[datetime] = None
         self.min_delay_seconds = 2
         self.max_delay_seconds = 5
+        self._executor: Optional[ThreadPoolExecutor] = None
+        self._playwright_instance = None
     
     async def _get_browser(self) -> Browser:
         """Get or create browser instance"""
         if self.browser is None:
             try:
                 logger.info("[SCRAPER] Starting Playwright...")
+                # On non-Windows platforms, use async API normally
                 playwright = await async_playwright().start()
                 logger.info("[SCRAPER] Playwright started, launching Chromium browser...")
                 self.browser = await playwright.chromium.launch(
@@ -171,6 +184,123 @@ class PropertyScraper:
         except Exception as e:
             logger.error(f"Error during slow scroll: {e}", exc_info=True)
     
+    def _scrape_homes_estimate_sync(self, property_link: str) -> Optional[float]:
+        """
+        Synchronous version of scraping for Windows (runs in thread pool).
+        Uses sync Playwright API to avoid asyncio subprocess issues.
+        """
+        from playwright.sync_api import sync_playwright, TimeoutError as SyncPlaywrightTimeoutError
+        import time
+        
+        try:
+            logger.info(f"[SCRAPER SYNC] Starting sync scrape for: {property_link}")
+            
+            # Use sync Playwright
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            
+            try:
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = context.new_page()
+                
+                try:
+                    # Navigate - use 'load' instead of 'networkidle' (more reliable, networkidle often times out)
+                    logger.info(f"[SCRAPER SYNC] Navigating to {property_link}...")
+                    try:
+                        page.goto(property_link, wait_until='load', timeout=60000)
+                        logger.info(f"[SCRAPER SYNC] Page loaded (load event): {page.url}")
+                    except Exception as load_error:
+                        # Fallback to domcontentloaded if load times out
+                        logger.warning(f"[SCRAPER SYNC] Load event timeout, trying domcontentloaded: {load_error}")
+                        try:
+                            page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
+                            logger.info(f"[SCRAPER SYNC] Page loaded (domcontentloaded): {page.url}")
+                        except Exception as dom_error:
+                            logger.error(f"[SCRAPER SYNC] Failed to load page: {dom_error}")
+                            raise
+                    
+                    # Wait a bit for dynamic content to render
+                    time.sleep(2)
+                    logger.info(f"[SCRAPER SYNC] Waiting for dynamic content to render...")
+                    
+                    # Slow scroll
+                    page_height = page.evaluate("document.body.scrollHeight")
+                    scroll_step = 300
+                    scroll_count = 0
+                    current_position = 0
+                    while current_position < page_height:
+                        current_position += scroll_step
+                        page.evaluate(f"window.scrollTo(0, {current_position})")
+                        time.sleep(0.3)
+                        scroll_count += 1
+                        new_height = page.evaluate("document.body.scrollHeight")
+                        if new_height > page_height:
+                            page_height = new_height
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(1)
+                    logger.info(f"[SCRAPER SYNC] Scroll completed: {scroll_count} steps")
+                    
+                    # Extract price range
+                    page_text = page.text_content('body') or ''
+                    logger.info(f"[SCRAPER SYNC] Page text length: {len(page_text)} chars")
+                    
+                    patterns = [
+                        (r'HomesEstimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'HomesEstimate pattern'),
+                        (r'Property estimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Property estimate pattern'),
+                        (r'\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Generic price range pattern'),
+                    ]
+                    
+                    estimate_value = None
+                    for pattern, pattern_name in patterns:
+                        match = re.search(pattern, page_text, re.IGNORECASE)
+                        if match:
+                            try:
+                                val1_str, suffix1, val2_str, suffix2 = match.groups()
+                                val1 = float(val1_str.replace(',', ''))
+                                val2 = float(val2_str.replace(',', ''))
+                                
+                                if suffix1.upper() == 'K':
+                                    val1 *= 1000
+                                elif suffix1.upper() == 'M':
+                                    val1 *= 1000000
+                                
+                                if suffix2.upper() == 'K':
+                                    val2 *= 1000
+                                elif suffix2.upper() == 'M':
+                                    val2 *= 1000000
+                                
+                                estimate_value = (val1 + val2) / 2
+                                logger.info(f"[SCRAPER SYNC] SUCCESS! Range: ${val1:,.0f} - ${val2:,.0f}, median: ${estimate_value:,.0f}")
+                                break
+                            except (ValueError, IndexError) as e:
+                                logger.warning(f"[SCRAPER SYNC] Error parsing pattern {pattern_name}: {e}")
+                                continue
+                    
+                    if estimate_value:
+                        self.cache[property_link] = (estimate_value, datetime.now())
+                        logger.info(f"[SCRAPER SYNC] Cached: ${estimate_value:,.0f}")
+                        return estimate_value
+                    else:
+                        logger.warning(f"[SCRAPER SYNC] No estimate found for {property_link}")
+                        return None
+                        
+                finally:
+                    page.close()
+                    context.close()
+            finally:
+                browser.close()
+                playwright.stop()
+                
+        except Exception as e:
+            logger.error(f"[SCRAPER SYNC] Error: {e}", exc_info=True)
+            return None
+    
     async def scrape_homes_estimate(self, property_link: str, retry: bool = True) -> Optional[float]:
         """
         Scrape HomesEstimate from property page.
@@ -201,6 +331,28 @@ class PropertyScraper:
         # Enforce rate limiting
         await self._rate_limit()
         
+        # On Windows, use sync API in thread pool to avoid asyncio subprocess issues
+        if sys.platform == 'win32':
+            logger.info(f"[SCRAPER] Using sync Playwright API in thread pool (Windows workaround)")
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
+            
+            loop = asyncio.get_event_loop()
+            try:
+                result = await loop.run_in_executor(
+                    self._executor, self._scrape_homes_estimate_sync, property_link
+                )
+                return result
+            except Exception as e:
+                logger.error(f"[SCRAPER] Error in thread pool execution: {e}", exc_info=True)
+                if retry:
+                    retry_delay = random.uniform(2, 4)
+                    logger.info(f"[SCRAPER] Retrying after {retry_delay:.2f} seconds...")
+                    await asyncio.sleep(retry_delay)
+                    return await self.scrape_homes_estimate(property_link, retry=False)
+                return None
+        
+        # Non-Windows: use async API normally
         try:
             logger.info(f"[SCRAPER] Getting browser instance...")
             _scraper_file_handler.flush()
@@ -214,11 +366,25 @@ class PropertyScraper:
             page = await context.new_page()
             
             try:
-                # Navigate to property page
+                # Navigate to property page - use 'load' instead of 'networkidle' (more reliable)
                 logger.info(f"[SCRAPER] Navigating to {property_link}...")
                 _scraper_file_handler.flush()
-                await page.goto(property_link, wait_until='networkidle', timeout=30000)
-                logger.info(f"[SCRAPER] Page loaded successfully, URL: {page.url}")
+                try:
+                    await page.goto(property_link, wait_until='load', timeout=60000)
+                    logger.info(f"[SCRAPER] Page loaded (load event), URL: {page.url}")
+                except Exception as load_error:
+                    # Fallback to domcontentloaded if load times out
+                    logger.warning(f"[SCRAPER] Load event timeout, trying domcontentloaded: {load_error}")
+                    try:
+                        await page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
+                        logger.info(f"[SCRAPER] Page loaded (domcontentloaded), URL: {page.url}")
+                    except Exception as dom_error:
+                        logger.error(f"[SCRAPER] Failed to load page: {dom_error}")
+                        raise
+                
+                # Wait a bit for dynamic content to render
+                await asyncio.sleep(2)
+                logger.info(f"[SCRAPER] Waiting for dynamic content to render...")
                 _scraper_file_handler.flush()
                 
                 # Slowly scroll to load all content
@@ -356,8 +522,22 @@ class PropertyScraper:
     async def close(self):
         """Close browser instance"""
         if self.browser:
-            await self.browser.close()
+            if sys.platform == 'win32' and self._playwright_instance:
+                # Sync API cleanup
+                try:
+                    self.browser.close()
+                    self._playwright_instance.stop()
+                except Exception as e:
+                    logger.warning(f"[SCRAPER] Error closing sync browser: {e}")
+            else:
+                # Async API cleanup
+                await self.browser.close()
             self.browser = None
+            self._playwright_instance = None
+        
+        if self._executor:
+            self._executor.shutdown(wait=False)
+            self._executor = None
 
 # Global scraper instance
 _scraper_instance: Optional[PropertyScraper] = None

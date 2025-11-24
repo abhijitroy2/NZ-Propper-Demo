@@ -10,8 +10,25 @@ import asyncio
 from pathlib import Path
 
 # Fix Windows asyncio subprocess issue for Playwright
+# Note: In Python 3.12+, Windows event loops should support subprocess by default
+# But we'll set the policy explicitly for compatibility
 if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # Use nest_asyncio to allow nested event loops (workaround for subprocess issues)
+    try:
+        import nest_asyncio
+        nest_asyncio.apply()
+    except ImportError:
+        pass  # nest_asyncio not installed, continue without it
+    # Set event loop policy (deprecated in 3.12+ but may still be needed)
+    try:
+        # Try ProactorEventLoop first (better subprocess support)
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except AttributeError:
+        try:
+            # Fallback to SelectorEventLoop
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        except AttributeError:
+            pass  # Use default policy in Python 3.12+
 
 from .models import ProcessResponse, CalculationResult
 from .utils.file_parser import parse_file
@@ -52,6 +69,30 @@ logger = logging.getLogger(__name__)
 logger.info(f"Logging to file: {log_file.absolute()}")
 
 app = FastAPI(title="NZ PROPPER - Property Flip Calculator", version="1.0.0")
+
+# Ensure Windows event loop policy is set on startup
+@app.on_event("startup")
+async def startup_event():
+    """Ensure Windows event loop policy is set before any async operations"""
+    if sys.platform == 'win32':
+        try:
+            loop = asyncio.get_running_loop()
+            logger.info(f"[STARTUP] Event loop type: {type(loop).__name__}")
+            # Try to set ProactorEventLoop policy (supports subprocess better)
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                logger.info("[STARTUP] Set WindowsProactorEventLoopPolicy")
+            except AttributeError:
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                logger.info("[STARTUP] Set WindowsSelectorEventLoopPolicy (fallback)")
+        except RuntimeError:
+            # No running loop yet, set policy for future loops
+            try:
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+                logger.info("[STARTUP] Set WindowsProactorEventLoopPolicy (no running loop)")
+            except AttributeError:
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+                logger.info("[STARTUP] Set WindowsSelectorEventLoopPolicy (no running loop, fallback)")
 
 # Add CORS middleware
 app.add_middleware(
