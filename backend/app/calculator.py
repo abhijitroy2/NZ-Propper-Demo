@@ -121,6 +121,19 @@ class FlipCalculator:
         property_title = property_data.get("Property Title", "")
         has_stress = FlipCalculator.has_stress_keywords(property_title)
         
+        # Helper function to ensure string values
+        def ensure_string(value):
+            """Convert value to string if it's numeric, otherwise return as string or None"""
+            if value is None or value == "":
+                return None
+            if isinstance(value, (int, float)):
+                # Convert float to int string if it's a whole number
+                if isinstance(value, float) and value.is_integer():
+                    return str(int(value))
+                return str(value)
+            # Already a string, return as-is
+            return str(value) if value else None
+        
         # Create result with all original fields
         result = CalculationResult(
             # Original fields
@@ -135,10 +148,10 @@ class FlipCalculator:
             listing_date=property_data.get("Listing Date"),
             property_title=property_data.get("Property Title"),
             property_address=property_data.get("Property Address"),
-            bedrooms=property_data.get("Bedrooms"),
-            bathrooms=property_data.get("Bathrooms"),
-            area=property_data.get("Area"),
-            price=property_data.get("Price"),
+            bedrooms=ensure_string(property_data.get("Bedrooms")),
+            bathrooms=ensure_string(property_data.get("Bathrooms")),
+            area=ensure_string(property_data.get("Area")),
+            price=ensure_string(property_data.get("Price")),
             property_link=property_data.get("Property Link"),
             
             # Calculated values
