@@ -49,16 +49,35 @@ class FlipCalculator:
             if match:
                 price_value = match.group(1).replace(',', '')
                 try:
-                    return float(price_value)
+                    price = float(price_value)
+                    # Only return if it's a reasonable price (>= 1000)
+                    if price >= 1000:
+                        return price
                 except ValueError:
                     pass
         
-        # Try to extract any dollar amount
-        match = re.search(r'\$?\s*([\d,]+)', price_str)
+        # Try to extract dollar amounts with $ sign (most reliable)
+        match = re.search(r'\$\s*([\d,]+)', price_str)
         if match:
             price_value = match.group(1).replace(',', '')
             try:
-                return float(price_value)
+                price = float(price_value)
+                # Only return if it's a reasonable price (>= 1000)
+                if price >= 1000:
+                    return price
+            except ValueError:
+                pass
+        
+        # Try to extract large numbers that might be prices (>= 10000)
+        # This catches formats like "599900" or "599,900" without $ sign
+        match = re.search(r'\b([\d]{4,}[\d,]*)\b', price_str)
+        if match:
+            price_value = match.group(1).replace(',', '')
+            try:
+                price = float(price_value)
+                # Only return if it's a reasonable price (>= 10000)
+                if price >= 10000:
+                    return price
             except ValueError:
                 pass
         
