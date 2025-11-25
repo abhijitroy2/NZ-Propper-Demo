@@ -7,7 +7,8 @@ import sys
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright, Browser, Page, TimeoutError as PlaywrightTimeoutError
 
@@ -68,6 +69,17 @@ logger.info(f"[SCRAPER INIT] Property scraper module loaded. Log file: {log_file
 file_handler.flush()
 
 # Helper function to ensure logs are flushed
+@dataclass
+class PropertyScrapeResult:
+    """Result from scraping a property page"""
+    homes_estimate: Optional[float] = None  # Median of HomesEstimate range
+    homes_estimate_range: Optional[Tuple[float, float]] = None  # (low, high) range
+    sold_prices: List[float] = None  # List of sold property prices
+    
+    def __post_init__(self):
+        if self.sold_prices is None:
+            self.sold_prices = []
+
 def log_and_flush(level, message):
     """Log message and immediately flush to file"""
     getattr(logger, level)(message)
@@ -234,15 +246,19 @@ class PropertyScraper:
         
         return None
     
-    def _get_homes_estimate_range_sync(self, property_link: str) -> Optional[Tuple[float, float]]:
+    def _scrape_property_data_sync(self, property_link: str) -> PropertyScrapeResult:
         """
-        Synchronous version to get HomesEstimate range for Windows.
+        Unified synchronous scraping method for Windows.
+        Scrapes both HomesEstimate and sold properties in a single page load.
+        Returns PropertyScrapeResult with both values.
         """
         from playwright.sync_api import sync_playwright
         import time
         
+        result = PropertyScrapeResult()
+        
         try:
-            logger.info(f"[SCRAPER SYNC] Getting HomesEstimate range for: {property_link}")
+            logger.info(f"[SCRAPER SYNC] Starting unified scrape for: {property_link}")
             
             playwright = sync_playwright().start()
             browser = playwright.chromium.launch(
@@ -258,12 +274,185 @@ class PropertyScraper:
                 page = context.new_page()
                 
                 try:
-                    page.goto(property_link, wait_until='load', timeout=60000)
+                    # Navigate to property page
+                    logger.info(f"[SCRAPER SYNC] Navigating to {property_link}...")
+                    try:
+                        page.goto(property_link, wait_until='load', timeout=60000)
+                        logger.info(f"[SCRAPER SYNC] Page loaded: {page.url}")
+                    except Exception as load_error:
+                        logger.warning(f"[SCRAPER SYNC] Load timeout, trying domcontentloaded: {load_error}")
+                        page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Wait longer for dynamic content to fully load
+                    logger.info(f"[SCRAPER SYNC] Waiting for dynamic content to load...")
+                    time.sleep(5)  # Increased from 2 to 5 seconds
+                    
+                    # Scroll page to trigger lazy loading
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     time.sleep(2)
+                    page.evaluate("window.scrollTo(0, 0)")
+                    time.sleep(2)
+                    
+                    # Get page text for HomesEstimate extraction
                     page_text = page.text_content('body') or ''
                     
+                    # Extract HomesEstimate range
+                    logger.info(f"[SCRAPER SYNC] Extracting HomesEstimate range...")
                     estimate_range = self._extract_homes_estimate_range(page_text)
-                    return estimate_range
+                    if estimate_range:
+                        low, high = estimate_range
+                        result.homes_estimate_range = estimate_range
+                        result.homes_estimate = (low + high) / 2
+                        logger.info(f"[SCRAPER SYNC] Found HomesEstimate range: ${low:,.0f} - ${high:,.0f}, median: ${result.homes_estimate:,.0f}")
+                    else:
+                        logger.warning(f"[SCRAPER SYNC] Could not extract HomesEstimate range")
+                    
+                    # Find and scroll to "Nearby Sold Properties" section
+                    logger.info(f"[SCRAPER SYNC] Searching for 'Nearby Sold Properties' section...")
+                    
+                    # Wait for section to appear with multiple strategies
+                    sold_section_found = False
+                    for attempt in range(3):
+                        # Try to find section by text content
+                        page_text_current = page.text_content('body') or ''
+                        if 'Nearby Sold Properties' in page_text_current or 'nearby sold' in page_text_current.lower():
+                            sold_section_found = True
+                            logger.info(f"[SCRAPER SYNC] Found 'Nearby Sold Properties' text in page (attempt {attempt + 1})")
+                            break
+                        
+                        # Try to find section by selector
+                        try:
+                            # Look for common selectors that might contain the section
+                            selectors_to_try = [
+                                'h2:has-text("Nearby Sold Properties")',
+                                'h3:has-text("Nearby Sold Properties")',
+                                '[class*="sold"]',
+                                '[class*="nearby"]',
+                                'section:has-text("Nearby Sold")',
+                            ]
+                            for selector in selectors_to_try:
+                                element = page.query_selector(selector)
+                                if element:
+                                    logger.info(f"[SCRAPER SYNC] Found section using selector: {selector}")
+                                    sold_section_found = True
+                                    break
+                            if sold_section_found:
+                                break
+                        except Exception:
+                            pass
+                        
+                        if attempt < 2:
+                            logger.info(f"[SCRAPER SYNC] Section not found yet, waiting and scrolling (attempt {attempt + 1}/3)...")
+                            # Scroll down to trigger lazy loading
+                            page.evaluate("window.scrollBy(0, 500)")
+                            time.sleep(3)  # Wait longer for content to load
+                    
+                    if not sold_section_found:
+                        logger.warning(f"[SCRAPER SYNC] 'Nearby Sold Properties' section not found after multiple attempts")
+                        return result
+                    
+                    # Scroll to the section explicitly
+                    logger.info(f"[SCRAPER SYNC] Scrolling to 'Nearby Sold Properties' section...")
+                    page.evaluate("""
+                        const elements = Array.from(document.querySelectorAll('*'));
+                        const soldSection = elements.find(el => 
+                            el.textContent && (
+                                el.textContent.includes('Nearby Sold Properties') || 
+                                el.textContent.includes('nearby sold')
+                            )
+                        );
+                        if (soldSection) {
+                            soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    """)
+                    time.sleep(4)  # Wait longer for section to fully render
+                    
+                    # Extract sold prices with pagination
+                    logger.info(f"[SCRAPER SYNC] Extracting sold properties...")
+                    max_clicks = 50
+                    click_count = 0
+                    
+                    while click_count < max_clicks:
+                        # Extract sold prices from current view
+                        page_html = page.content()
+                        
+                        # Extract all sold prices from page HTML
+                        sold_patterns = [
+                            r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
+                        ]
+                        
+                        prices_before = len(result.sold_prices)
+                        for pattern in sold_patterns:
+                            matches = re.finditer(pattern, page_html, re.IGNORECASE)
+                            for match in matches:
+                                value_str = match.group(1)
+                                suffix = match.group(2) if len(match.groups()) > 1 else ''
+                                try:
+                                    price = float(value_str.replace(',', ''))
+                                    if suffix.upper() == 'K':
+                                        price *= 1000
+                                    elif suffix.upper() == 'M':
+                                        price *= 1000000
+                                    if price >= 1000 and price not in result.sold_prices:
+                                        result.sold_prices.append(price)
+                                        logger.debug(f"[SCRAPER SYNC] Found sold price: ${price:,.0f}")
+                                except (ValueError, IndexError):
+                                    continue
+                        
+                        prices_after = len(result.sold_prices)
+                        if prices_after == prices_before and click_count > 0:
+                            # No new prices found, likely at end
+                            logger.info(f"[SCRAPER SYNC] No new prices found, stopping pagination")
+                            break
+                        
+                        # Try to find and click '>' button
+                        next_button = None
+                        selectors = [
+                            'button[aria-label*="next" i]',
+                            'button[aria-label*=">" i]',
+                            'button:has-text(">")',
+                            '[class*="next"]',
+                            '[class*="arrow-right"]',
+                            'button >> text=">"',
+                            'a[aria-label*="next" i]',
+                            'a[aria-label*=">" i]',
+                        ]
+                        
+                        for selector in selectors:
+                            try:
+                                next_button = page.query_selector(selector)
+                                if next_button:
+                                    # Check if button is disabled or not visible
+                                    is_disabled = (
+                                        next_button.get_attribute('disabled') or
+                                        next_button.get_attribute('aria-disabled') == 'true' or
+                                        'disabled' in (next_button.get_attribute('class') or '') or
+                                        not next_button.is_visible()
+                                    )
+                                    if is_disabled:
+                                        logger.info(f"[SCRAPER SYNC] Next button is disabled/not visible, stopping pagination")
+                                        next_button = None
+                                        break
+                                    break
+                            except Exception:
+                                continue
+                        
+                        if not next_button:
+                            logger.info(f"[SCRAPER SYNC] No next button found, stopping pagination")
+                            break
+                        
+                        # Click next button
+                        try:
+                            logger.info(f"[SCRAPER SYNC] Clicking next button (click {click_count + 1})...")
+                            next_button.click()
+                            time.sleep(3)  # Wait longer for new content to load
+                            click_count += 1
+                        except Exception as e:
+                            logger.warning(f"[SCRAPER SYNC] Failed to click next button: {e}")
+                            break
+                    
+                    logger.info(f"[SCRAPER SYNC] Collected {len(result.sold_prices)} sold prices after {click_count} pagination clicks")
                     
                 finally:
                     page.close()
@@ -273,8 +462,9 @@ class PropertyScraper:
                 playwright.stop()
                 
         except Exception as e:
-            logger.error(f"[SCRAPER SYNC] Error getting HomesEstimate range: {e}", exc_info=True)
-            return None
+            logger.error(f"[SCRAPER SYNC] Error in unified scrape: {e}", exc_info=True)
+        
+        return result
     
     def _parse_sold_price(self, text: str) -> Optional[float]:
         """
@@ -829,15 +1019,16 @@ class PropertyScraper:
         
         return sold_prices
     
-    async def scrape_sold_properties(self, property_link: str) -> list[float]:
+    async def scrape_property_data(self, property_link: str) -> PropertyScrapeResult:
         """
-        Scrape sold properties from "Nearby Sold Properties" section.
-        Returns list of sold prices (floats).
+        Unified method to scrape both HomesEstimate and sold properties in one page load.
+        Returns PropertyScrapeResult with both values.
+        This is the main method to use - it encapsulates all scraping logic.
         """
         if not property_link:
-            return []
+            return PropertyScrapeResult()
         
-        logger.info(f"[SCRAPER] Starting sold properties scrape for: {property_link}")
+        logger.info(f"[SCRAPER] Starting unified scrape for: {property_link}")
         
         # On Windows, use sync API in thread pool
         if sys.platform == 'win32':
@@ -847,16 +1038,16 @@ class PropertyScraper:
             
             loop = asyncio.get_event_loop()
             try:
-                sold_prices = await loop.run_in_executor(
-                    self._executor, self._scrape_sold_properties_sync, property_link
+                result = await loop.run_in_executor(
+                    self._executor, self._scrape_property_data_sync, property_link
                 )
-                return sold_prices
+                return result
             except Exception as e:
                 logger.error(f"[SCRAPER] Error in thread pool execution: {e}", exc_info=True)
-                return []
+                return PropertyScrapeResult()
         
-        # Non-Windows: use async API
-        sold_prices = []
+        # Non-Windows: use async API (similar logic but async)
+        result = PropertyScrapeResult()
         try:
             browser = await self._get_browser()
             context = await browser.new_context(
@@ -873,13 +1064,40 @@ class PropertyScraper:
                 except Exception:
                     await page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
                 
+                # Wait longer for dynamic content
+                await asyncio.sleep(5)
+                
+                # Scroll to trigger lazy loading
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+                await page.evaluate("window.scrollTo(0, 0)")
                 await asyncio.sleep(2)
                 
-                # Find "Nearby Sold Properties" section
+                # Get page text for HomesEstimate
                 page_text = await page.text_content('body') or ''
-                if 'Nearby Sold Properties' not in page_text and 'nearby sold' not in page_text.lower():
+                
+                # Extract HomesEstimate range
+                estimate_range = self._extract_homes_estimate_range(page_text)
+                if estimate_range:
+                    low, high = estimate_range
+                    result.homes_estimate_range = estimate_range
+                    result.homes_estimate = (low + high) / 2
+                    logger.info(f"[SCRAPER] Found HomesEstimate range: ${low:,.0f} - ${high:,.0f}")
+                
+                # Find "Nearby Sold Properties" section with retries
+                sold_section_found = False
+                for attempt in range(3):
+                    page_text_current = await page.text_content('body') or ''
+                    if 'Nearby Sold Properties' in page_text_current or 'nearby sold' in page_text_current.lower():
+                        sold_section_found = True
+                        break
+                    if attempt < 2:
+                        await page.evaluate("window.scrollBy(0, 500)")
+                        await asyncio.sleep(3)
+                
+                if not sold_section_found:
                     logger.warning(f"[SCRAPER] 'Nearby Sold Properties' section not found")
-                    return sold_prices
+                    return result
                 
                 # Scroll to section
                 await page.evaluate("""
@@ -894,20 +1112,20 @@ class PropertyScraper:
                         soldSection.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     }
                 """)
-                await asyncio.sleep(2)
+                await asyncio.sleep(4)
                 
-                # Paginate and collect prices
+                # Extract sold prices with pagination
                 max_clicks = 50
                 click_count = 0
                 
                 while click_count < max_clicks:
-                    # Extract prices from current view
                     page_html = await page.content()
                     sold_patterns = [
                         r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)',
                         r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
                     ]
                     
+                    prices_before = len(result.sold_prices)
                     for pattern in sold_patterns:
                         matches = re.finditer(pattern, page_html, re.IGNORECASE)
                         for match in matches:
@@ -919,10 +1137,13 @@ class PropertyScraper:
                                     price *= 1000
                                 elif suffix.upper() == 'M':
                                     price *= 1000000
-                                if price >= 1000 and price not in sold_prices:
-                                    sold_prices.append(price)
+                                if price >= 1000 and price not in result.sold_prices:
+                                    result.sold_prices.append(price)
                             except (ValueError, IndexError):
                                 continue
+                    
+                    if len(result.sold_prices) == prices_before and click_count > 0:
+                        break
                     
                     # Find next button
                     next_button = None
@@ -932,14 +1153,18 @@ class PropertyScraper:
                         'button:has-text(">")',
                         '[class*="next"]',
                         '[class*="arrow-right"]',
+                        'a[aria-label*="next" i]',
                     ]
                     
                     for selector in selectors:
                         try:
                             next_button = await page.query_selector(selector)
                             if next_button:
-                                is_disabled = await next_button.get_attribute('disabled') or \
-                                            await next_button.get_attribute('aria-disabled') == 'true'
+                                is_disabled = (
+                                    await next_button.get_attribute('disabled') or
+                                    await next_button.get_attribute('aria-disabled') == 'true' or
+                                    not await next_button.is_visible()
+                                )
                                 if is_disabled:
                                     next_button = None
                                     break
@@ -950,25 +1175,32 @@ class PropertyScraper:
                     if not next_button:
                         break
                     
-                    # Click next
                     try:
                         await next_button.click()
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(3)
                         click_count += 1
                     except Exception as e:
                         logger.warning(f"[SCRAPER] Failed to click next: {e}")
                         break
                 
-                logger.info(f"[SCRAPER] Collected {len(sold_prices)} sold prices")
+                logger.info(f"[SCRAPER] Collected {len(result.sold_prices)} sold prices")
                 
             finally:
                 await page.close()
                 await context.close()
                 
         except Exception as e:
-            logger.error(f"[SCRAPER] Error scraping sold properties: {e}", exc_info=True)
+            logger.error(f"[SCRAPER] Error in unified scrape: {e}", exc_info=True)
         
-        return sold_prices
+        return result
+    
+    async def scrape_sold_properties(self, property_link: str) -> list[float]:
+        """
+        Legacy method - now uses unified scrape_property_data.
+        Kept for backward compatibility.
+        """
+        result = await self.scrape_property_data(property_link)
+        return result.sold_prices
     
     async def close(self):
         """Close browser instance"""
@@ -1004,24 +1236,35 @@ def get_scraper() -> PropertyScraper:
         _scraper_file_handler.flush()
     return _scraper_instance
 
+async def scrape_property_data(property_link: str) -> PropertyScrapeResult:
+    """
+    Unified convenience function to scrape both HomesEstimate and sold properties.
+    This is the main function to use - it loads the page once and gets both values.
+    """
+    logger.info(f"[SCRAPER] scrape_property_data called for: {property_link}")
+    _scraper_file_handler.flush()
+    scraper = get_scraper()
+    return await scraper.scrape_property_data(property_link)
+
 async def scrape_property_estimate(property_link: str) -> Optional[float]:
     """
     Convenience function to scrape property estimate.
-    This is the main function to use from outside this module.
+    Uses unified scrape_property_data internally for efficiency.
     """
-    # Ensure logger is initialized
     logger.info(f"[SCRAPER] scrape_property_estimate called for: {property_link}")
     _scraper_file_handler.flush()
     scraper = get_scraper()
-    return await scraper.scrape_homes_estimate(property_link)
+    result = await scraper.scrape_property_data(property_link)
+    return result.homes_estimate
 
 async def scrape_sold_properties(property_link: str) -> list[float]:
     """
     Convenience function to scrape sold properties.
-    Returns list of sold prices from "Nearby Sold Properties" section.
+    Uses unified scrape_property_data internally for efficiency.
     """
     logger.info(f"[SCRAPER] scrape_sold_properties called for: {property_link}")
     _scraper_file_handler.flush()
     scraper = get_scraper()
-    return await scraper.scrape_sold_properties(property_link)
+    result = await scraper.scrape_property_data(property_link)
+    return result.sold_prices
 
