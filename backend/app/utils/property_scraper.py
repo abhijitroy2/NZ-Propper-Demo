@@ -696,13 +696,21 @@ class PropertyScraper:
                         try:
                             logger.info(f"[SCRAPER SYNC] Clicking next button (click {click_count + 1})...")
                             next_button.click()
-                            time.sleep(3)  # Wait longer for new content to load
+                            time.sleep(5)  # Wait longer for new cards to load
+                            # Wait for new cards to appear
+                            try:
+                                page.wait_for_selector('[class*="sold"][class*="card"], [class*="property"][class*="card"]', 
+                                                      timeout=5000, state='visible')
+                            except Exception:
+                                pass  # Continue even if cards not found
                             click_count += 1
                         except Exception as e:
                             logger.warning(f"[SCRAPER SYNC] Failed to click next button: {e}")
                             break
                     
-                    logger.info(f"[SCRAPER SYNC] Collected {len(result.sold_prices)} sold prices after {click_count} pagination clicks")
+                    # Sort and filter sold prices one final time
+                    result.sold_prices = sorted([p for p in result.sold_prices if 100000 <= p <= 10000000])
+                    logger.info(f"[SCRAPER SYNC] Collected {len(result.sold_prices)} sold prices (filtered: $100k-$10M) after {click_count} pagination clicks")
                     
                 finally:
                     page.close()
