@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import CalculatorMode from './components/CalculatorMode';
 import FileUpload from './components/FileUpload';
+import UrlInput from './components/UrlInput';
 import ResultsTable from './components/ResultsTable';
-import { calculateProperties } from './services/api';
+import { calculateProperties, analyzeSingleProperty } from './services/api';
 import './App.css';
 
 function App() {
@@ -27,6 +28,23 @@ function App() {
       setResults(data.results);
     } catch (err) {
       setError(err.message || 'An error occurred while processing the file');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUrlSubmit = async (url) => {
+    setError(null);
+    setResults(null);
+    setFile(null);
+
+    setLoading(true);
+    try {
+      const data = await analyzeSingleProperty(url);
+      // API returns { result: CalculationResult }, convert to array for ResultsTable
+      setResults([data.result]);
+    } catch (err) {
+      setError(err.message || 'An error occurred while analyzing the property');
     } finally {
       setLoading(false);
     }
@@ -64,6 +82,44 @@ function App() {
             </h2>
             <p style={{ color: '#999' }}>Rental mode is currently under development.</p>
           </div>
+        ) : mode === 'flip-or-rent' ? (
+          <>
+            <UrlInput onUrlSubmit={handleUrlSubmit} disabled={loading} />
+
+            {loading && (
+              <div style={{ textAlign: 'center', padding: '2rem' }}>
+                <p style={{ fontSize: '1.1rem', color: '#666' }}>
+                  Analyzing property... This may take a minute.
+                </p>
+              </div>
+            )}
+
+            {error && (
+              <div
+                style={{
+                  padding: '1rem',
+                  backgroundColor: '#ffebee',
+                  color: '#c62828',
+                  borderRadius: '8px',
+                  marginBottom: '1rem',
+                }}
+              >
+                <strong>Error:</strong> {error}
+              </div>
+            )}
+
+            {results && results.length > 0 && (
+              <ResultsTable
+                results={results}
+                summary={{
+                  total_properties: results.length,
+                  good_deals_count: results.filter((r) => r.is_good_deal).length,
+                  stress_sales_count: results.filter((r) => r.has_stress_keywords).length,
+                  duplicates_removed: 0,
+                }}
+              />
+            )}
+          </>
         ) : (
           <>
             <FileUpload onFileSelect={handleFileSelect} disabled={loading} />

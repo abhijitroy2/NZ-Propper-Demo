@@ -1,14 +1,16 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from typing import List
+from pydantic import BaseModel, HttpUrl
 import io
 import logging
 import atexit
 import sys
 import asyncio
 from pathlib import Path
+import re
 
 # Fix Windows asyncio subprocess issue for Playwright
 # Note: In Python 3.12+, Windows event loops should support subprocess by default
@@ -34,7 +36,7 @@ if sys.platform == 'win32':
 from .models import ProcessResponse, CalculationResult
 from .utils.file_parser import parse_file
 from .utils.duplicate_handler import remove_duplicates
-from .utils.property_scraper import get_scraper
+from .utils.property_scraper import get_scraper, scrape_property_data
 from .calculator import FlipCalculator
 
 # Configure logging to file and console
@@ -180,6 +182,66 @@ async def calculate_properties(file: UploadFile = File(...)):
     
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class AnalyzeSingleRequest(BaseModel):
+    """Request model for single property analysis"""
+    url: str
+
+
+@app.post("/api/analyze-single")
+async def analyze_single_property(request: AnalyzeSingleRequest):
+    """
+    Analyze a single property from TradeMe URL.
+    Scrapes property details, performs flip calculations, and returns result with rental yield.
+    """
+    try:
+        url = request.url.strip()
+        
+        # Validate URL format (basic validation)
+        if not url.startswith(('http://', 'https://')):
+            raise HTTPException(status_code=400, detail="Invalid URL format. URL must start with http:// or https://")
+        
+        # Check if it's a TradeMe URL (optional, but helpful)
+        if 'trademe.co.nz' not in url.lower():
+            logger.warning(f"URL does not appear to be a TradeMe URL: {url}")
+        
+        logger.info(f"[API] Analyzing single property from URL: {url}")
+        
+        # Scrape property data
+        scraper = get_scraper()
+        scrape_result = await scrape_property_data(url)
+        
+        # Extract property details from scrape result
+        property_data = {
+            "Property Link": url,
+            "Property Address": None,  # Will be extracted from page if possible
+            "Property Title": None,   # Will be extracted from page if possible
+            "Price": None,            # Will be extracted from page if possible
+            "Bedrooms": scrape_result.bedrooms,
+            "Bathrooms": scrape_result.bathrooms,
+            "Area": scrape_result.area,
+        }
+        
+        # Try to extract more details from the page if needed
+        # For now, we'll use what we have and let the calculator handle defaults
+        
+        # Calculate flip values
+        result = await FlipCalculator.calculate_async(property_data)
+        
+        # Add rental yield information from scrape result
+        result.rental_yield_percentage = scrape_result.rental_yield_percentage
+        result.rental_yield_range = scrape_result.rental_yield_range
+        
+        logger.info(f"[API] Analysis complete. Profit: ${result.profit:,.2f}, Rental Yield: {result.rental_yield_percentage}%")
+        
+        return {"result": result}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[API] Error analyzing single property: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error analyzing property: {str(e)}")
 
 
 # Serve frontend index.html for React Router (catch-all route)

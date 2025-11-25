@@ -43,6 +43,8 @@ const ResultsTable = ({ results, summary }) => {
       'Contingency',
       'Potential Sale Price',
       'Profit',
+      'Rental Yield %',
+      'Weekly Rent Range',
       'Is Good Deal',
       'Has Stress Keywords',
     ];
@@ -58,6 +60,8 @@ const ResultsTable = ({ results, summary }) => {
       r.contingency,
       r.potential_sale_price,
       r.profit,
+      r.rental_yield_percentage ? `${r.rental_yield_percentage.toFixed(1)}%` : '',
+      r.rental_yield_range ? `$${r.rental_yield_range[0]}-$${r.rental_yield_range[1]}/week` : '',
       r.is_good_deal ? 'Yes' : 'No',
       r.has_stress_keywords ? 'Yes' : 'No',
     ]);
@@ -331,6 +335,16 @@ const ResultsTable = ({ results, summary }) => {
                         {result.area && (
                           <div>
                             <strong>Area:</strong> {result.area}
+                          </div>
+                        )}
+                        {result.rental_yield_percentage && (
+                          <div>
+                            <strong>Rental Yield:</strong> {result.rental_yield_percentage.toFixed(1)}%
+                          </div>
+                        )}
+                        {result.rental_yield_range && (
+                          <div>
+                            <strong>Weekly Rent Range:</strong> ${result.rental_yield_range[0]} - ${result.rental_yield_range[1]} /week
                           </div>
                         )}
                         {result.property_link && (

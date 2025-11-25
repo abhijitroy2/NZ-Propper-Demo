@@ -44,4 +44,21 @@ export const healthCheck = async () => {
   return response.json();
 };
 
+export const analyzeSingleProperty = async (url) => {
+  const response = await fetch(`${API_BASE_URL}/api/analyze-single`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Analysis failed');
+  }
+
+  return response.json();
+};
+
 

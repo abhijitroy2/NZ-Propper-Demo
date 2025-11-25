@@ -75,6 +75,11 @@ class PropertyScrapeResult:
     homes_estimate: Optional[float] = None  # Median of HomesEstimate range
     homes_estimate_range: Optional[Tuple[float, float]] = None  # (low, high) range
     sold_prices: List[float] = None  # List of sold property prices
+    bedrooms: Optional[str] = None  # Number of bedrooms
+    bathrooms: Optional[str] = None  # Number of bathrooms
+    area: Optional[str] = None  # Property area (e.g., "431 m2")
+    rental_yield_percentage: Optional[float] = None  # Rental yield percentage (e.g., 4.1)
+    rental_yield_range: Optional[Tuple[float, float]] = None  # Weekly rent range (low, high)
     
     def __post_init__(self):
         if self.sold_prices is None:
@@ -206,6 +211,11 @@ class PropertyScraper:
                         result.homes_estimate = cache_entry.get('homes_estimate')
                         result.homes_estimate_range = cache_entry.get('homes_estimate_range')
                         result.sold_prices = cache_entry.get('sold_prices', [])
+                        result.bedrooms = cache_entry.get('bedrooms')
+                        result.bathrooms = cache_entry.get('bathrooms')
+                        result.area = cache_entry.get('area')
+                        result.rental_yield_percentage = cache_entry.get('rental_yield_percentage')
+                        result.rental_yield_range = cache_entry.get('rental_yield_range')
                         return result
                     else:
                         logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours)")
@@ -225,6 +235,11 @@ class PropertyScraper:
                 'homes_estimate': result.homes_estimate,
                 'homes_estimate_range': result.homes_estimate_range,
                 'sold_prices': result.sold_prices,
+                'bedrooms': result.bedrooms,
+                'bathrooms': result.bathrooms,
+                'area': result.area,
+                'rental_yield_percentage': result.rental_yield_percentage,
+                'rental_yield_range': result.rental_yield_range,
                 'timestamp': datetime.now().isoformat()
             }
             self.cache[property_link] = cache_entry
@@ -353,6 +368,189 @@ class PropertyScraper:
             logger.warning(f"Error extracting HomesEstimate range: {e}")
         
         return None
+    
+    def _extract_bedrooms(self, page_html: str, page_text: str) -> Optional[str]:
+        """
+        Extract bedrooms from page. Looks for bed icon and nearby text like "3 Beds" or "3 Bedrooms".
+        Returns string representation of number of bedrooms.
+        """
+        try:
+            # Pattern 1: Look for text patterns like "3 Beds", "3 Bedrooms", "3 Bed"
+            patterns = [
+                r'(\d+)\s*(?:bed|beds|bedroom|bedrooms)\b',
+                r'\b(\d+)\s*(?:bed|beds|bedroom|bedrooms)\b',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    bedrooms = match.group(1)
+                    logger.debug(f"[SCRAPER] Found bedrooms using pattern: {bedrooms}")
+                    return bedrooms
+            
+            # Pattern 2: Look for bed icon in HTML and extract nearby text
+            # Common selectors for bed icons
+            bed_icon_patterns = [
+                r'<[^>]*(?:class|data-testid)[^>]*bed[^>]*>',
+                r'<svg[^>]*bed[^>]*>',
+            ]
+            
+            for icon_pattern in bed_icon_patterns:
+                matches = re.finditer(icon_pattern, page_html, re.IGNORECASE)
+                for match in matches:
+                    # Look for number near the icon (within 100 chars)
+                    start_pos = max(0, match.start() - 50)
+                    end_pos = min(len(page_html), match.end() + 50)
+                    context = page_html[start_pos:end_pos]
+                    
+                    # Try to find number in context
+                    number_match = re.search(r'\b(\d+)\b', context)
+                    if number_match:
+                        bedrooms = number_match.group(1)
+                        # Validate it's a reasonable number (1-20)
+                        if 1 <= int(bedrooms) <= 20:
+                            logger.debug(f"[SCRAPER] Found bedrooms near icon: {bedrooms}")
+                            return bedrooms
+            
+        except Exception as e:
+            logger.warning(f"Error extracting bedrooms: {e}")
+        
+        return None
+    
+    def _extract_bathrooms(self, page_html: str, page_text: str) -> Optional[str]:
+        """
+        Extract bathrooms from page. Similar to bedrooms extraction.
+        Returns string representation of number of bathrooms.
+        """
+        try:
+            # Pattern 1: Look for text patterns like "2 Baths", "2 Bathrooms", "2 Bath"
+            patterns = [
+                r'(\d+)\s*(?:bath|baths|bathroom|bathrooms)\b',
+                r'\b(\d+)\s*(?:bath|baths|bathroom|bathrooms)\b',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    bathrooms = match.group(1)
+                    logger.debug(f"[SCRAPER] Found bathrooms using pattern: {bathrooms}")
+                    return bathrooms
+            
+            # Pattern 2: Look for bathroom icon in HTML
+            bath_icon_patterns = [
+                r'<[^>]*(?:class|data-testid)[^>]*bath[^>]*>',
+                r'<svg[^>]*bath[^>]*>',
+            ]
+            
+            for icon_pattern in bath_icon_patterns:
+                matches = re.finditer(icon_pattern, page_html, re.IGNORECASE)
+                for match in matches:
+                    start_pos = max(0, match.start() - 50)
+                    end_pos = min(len(page_html), match.end() + 50)
+                    context = page_html[start_pos:end_pos]
+                    
+                    number_match = re.search(r'\b(\d+)\b', context)
+                    if number_match:
+                        bathrooms = number_match.group(1)
+                        if 1 <= int(bathrooms) <= 20:
+                            logger.debug(f"[SCRAPER] Found bathrooms near icon: {bathrooms}")
+                            return bathrooms
+            
+        except Exception as e:
+            logger.warning(f"Error extracting bathrooms: {e}")
+        
+        return None
+    
+    def _extract_area(self, page_text: str) -> Optional[str]:
+        """
+        Extract property area from page text.
+        Looks for patterns like "431 m2", "431m²", "431 sqm", etc.
+        Returns string representation of area.
+        """
+        try:
+            # Patterns for area extraction
+            patterns = [
+                r'(\d+(?:[.,]\d+)?)\s*(?:m2|m²|sqm|square\s*meters?|square\s*metres?)',
+                r'(\d+(?:[.,]\d+)?)\s*m\s*[²2]',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    area = match.group(1).replace(',', '')
+                    logger.debug(f"[SCRAPER] Found area: {area} m2")
+                    return f"{area} m2"
+            
+        except Exception as e:
+            logger.warning(f"Error extracting area: {e}")
+        
+        return None
+    
+    def _extract_rental_yield(self, page_html: str, page_text: str) -> Tuple[Optional[float], Optional[Tuple[float, float]]]:
+        """
+        Extract rental yield from RentEstimate section.
+        Returns tuple: (yield_percentage, weekly_rent_range)
+        where weekly_rent_range is (low, high) in dollars per week.
+        """
+        yield_percentage = None
+        weekly_rent_range = None
+        
+        try:
+            # First, find RentEstimate section
+            rent_estimate_pattern = r'RentEstimate[^$]*?(?:\$|\d)'
+            if not re.search(rent_estimate_pattern, page_text, re.IGNORECASE):
+                logger.debug("[SCRAPER] RentEstimate section not found in page text")
+                return (None, None)
+            
+            # Extract weekly rent range: "$460 - $590 /week" or "$460-$590/week"
+            rent_range_patterns = [
+                r'\$?\s*(\d+)\s*[-–—]\s*\$?\s*(\d+)\s*/week',
+                r'\$?\s*(\d+)\s*to\s*\$?\s*(\d+)\s*/week',
+            ]
+            
+            for pattern in rent_range_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    low_str, high_str = match.groups()
+                    try:
+                        low = float(low_str)
+                        high = float(high_str)
+                        if 50 <= low <= 5000 and 50 <= high <= 5000 and low <= high:
+                            weekly_rent_range = (low, high)
+                            logger.debug(f"[SCRAPER] Found weekly rent range: ${low} - ${high} /week")
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            
+            # Extract yield percentage: "4.1%" or "4.1 %"
+            yield_patterns = [
+                r'(\d+\.?\d*)\s*%',
+                r'yield[^%]*(\d+\.?\d*)\s*%',
+                r'(\d+\.?\d*)\s*%\s*yield',
+            ]
+            
+            # Look for percentage near "RentEstimate" or "rental yield"
+            rent_section_start = page_text.lower().find('rentestimate')
+            if rent_section_start >= 0:
+                # Search within 500 chars of RentEstimate
+                search_text = page_text[max(0, rent_section_start):min(len(page_text), rent_section_start + 500)]
+                
+                for pattern in yield_patterns:
+                    match = re.search(pattern, search_text, re.IGNORECASE)
+                    if match:
+                        try:
+                            percentage = float(match.group(1))
+                            if 0.1 <= percentage <= 20.0:  # Reasonable yield range
+                                yield_percentage = percentage
+                                logger.debug(f"[SCRAPER] Found rental yield percentage: {percentage}%")
+                                break
+                        except (ValueError, TypeError):
+                            continue
+            
+        except Exception as e:
+            logger.warning(f"Error extracting rental yield: {e}")
+        
+        return (yield_percentage, weekly_rent_range)
     
     def _scrape_property_data_sync(self, property_link: str) -> PropertyScrapeResult:
         """
@@ -484,6 +682,28 @@ class PropertyScraper:
                         logger.info(f"[SCRAPER SYNC] Found HomesEstimate range: ${low:,.0f} - ${high:,.0f}, median: ${result.homes_estimate:,.0f}")
                     else:
                         logger.warning(f"[SCRAPER SYNC] Could not extract HomesEstimate range")
+                    
+                    # Extract property details: bedrooms, bathrooms, area
+                    logger.info(f"[SCRAPER SYNC] Extracting property details (bedrooms, bathrooms, area)...")
+                    result.bedrooms = self._extract_bedrooms(page_html, page_text)
+                    result.bathrooms = self._extract_bathrooms(page_html, page_text)
+                    result.area = self._extract_area(page_text)
+                    if result.bedrooms:
+                        logger.info(f"[SCRAPER SYNC] Found bedrooms: {result.bedrooms}")
+                    if result.bathrooms:
+                        logger.info(f"[SCRAPER SYNC] Found bathrooms: {result.bathrooms}")
+                    if result.area:
+                        logger.info(f"[SCRAPER SYNC] Found area: {result.area}")
+                    
+                    # Extract rental yield from RentEstimate section
+                    logger.info(f"[SCRAPER SYNC] Extracting rental yield...")
+                    yield_percentage, rent_range = self._extract_rental_yield(page_html, page_text)
+                    result.rental_yield_percentage = yield_percentage
+                    result.rental_yield_range = rent_range
+                    if yield_percentage:
+                        logger.info(f"[SCRAPER SYNC] Found rental yield percentage: {yield_percentage}%")
+                    if rent_range:
+                        logger.info(f"[SCRAPER SYNC] Found weekly rent range: ${rent_range[0]} - ${rent_range[1]} /week")
                     
                     # Find and scroll to "Nearby Sold Properties" section
                     logger.info(f"[SCRAPER SYNC] Searching for 'Nearby Sold Properties' section...")
@@ -1382,7 +1602,8 @@ class PropertyScraper:
                 await page.evaluate("window.scrollTo(0, 0)")
                 await asyncio.sleep(2)
                 
-                # Get page text for HomesEstimate
+                # Get page HTML and text for extraction
+                page_html = await page.content()
                 page_text = await page.text_content('body') or ''
                 
                 # Extract HomesEstimate range
@@ -1392,6 +1613,28 @@ class PropertyScraper:
                     result.homes_estimate_range = estimate_range
                     result.homes_estimate = (low + high) / 2
                     logger.info(f"[SCRAPER] Found HomesEstimate range: ${low:,.0f} - ${high:,.0f}")
+                
+                # Extract property details: bedrooms, bathrooms, area
+                logger.info(f"[SCRAPER] Extracting property details (bedrooms, bathrooms, area)...")
+                result.bedrooms = self._extract_bedrooms(page_html, page_text)
+                result.bathrooms = self._extract_bathrooms(page_html, page_text)
+                result.area = self._extract_area(page_text)
+                if result.bedrooms:
+                    logger.info(f"[SCRAPER] Found bedrooms: {result.bedrooms}")
+                if result.bathrooms:
+                    logger.info(f"[SCRAPER] Found bathrooms: {result.bathrooms}")
+                if result.area:
+                    logger.info(f"[SCRAPER] Found area: {result.area}")
+                
+                # Extract rental yield from RentEstimate section
+                logger.info(f"[SCRAPER] Extracting rental yield...")
+                yield_percentage, rent_range = self._extract_rental_yield(page_html, page_text)
+                result.rental_yield_percentage = yield_percentage
+                result.rental_yield_range = rent_range
+                if yield_percentage:
+                    logger.info(f"[SCRAPER] Found rental yield percentage: {yield_percentage}%")
+                if rent_range:
+                    logger.info(f"[SCRAPER] Found weekly rent range: ${rent_range[0]} - ${rent_range[1]} /week")
                 
                 # Find "Nearby Sold Properties" section with retries
                 sold_section_found = False

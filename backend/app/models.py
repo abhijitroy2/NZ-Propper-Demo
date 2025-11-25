@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from datetime import datetime
 
 
@@ -54,6 +54,10 @@ class CalculationResult(BaseModel):
     contingency: float
     potential_sale_price: float
     profit: float
+    
+    # Rental yield (from scraping)
+    rental_yield_percentage: Optional[float] = None
+    rental_yield_range: Optional[Tuple[float, float]] = None  # Weekly rent range (low, high)
     
     # Flags
     is_good_deal: bool

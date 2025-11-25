@@ -20,6 +20,17 @@ const CalculatorMode = ({ mode, onModeChange }) => {
           <input
             type="radio"
             name="mode"
+            value="flip-or-rent"
+            checked={mode === 'flip-or-rent'}
+            onChange={(e) => onModeChange(e.target.value)}
+            style={{ marginRight: '0.5rem' }}
+          />
+          <span style={{ fontSize: '1.1rem' }}>Flip Or Rent</span>
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+          <input
+            type="radio"
+            name="mode"
             value="rental"
             checked={mode === 'rental'}
             onChange={(e) => onModeChange(e.target.value)}
