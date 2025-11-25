@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from typing import List
 import io
 import logging
@@ -103,6 +104,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static files (frontend build) - must be after CORS middleware
+# Check if static directory exists (for unified deployment)
+static_dir = Path(__file__).parent.parent / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    logger.info(f"Mounted static files from: {static_dir.absolute()}")
+else:
+    logger.warning(f"Static directory not found: {static_dir.absolute()} - frontend may not be available")
+
 
 @app.get("/api/health")
 async def health_check():
@@ -170,6 +180,32 @@ async def calculate_properties(file: UploadFile = File(...)):
     
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# Serve frontend index.html for React Router (catch-all route)
+# This must be last to not interfere with API routes
+@app.get("/{full_path:path}")
+async def serve_frontend(full_path: str):
+    """
+    Serve frontend static files. For SPA routing, return index.html for non-API routes.
+    """
+    # Don't serve frontend for API routes
+    if full_path.startswith("api"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+    
+    # Check if static directory exists
+    static_dir = Path(__file__).parent.parent / "static"
+    index_file = static_dir / "index.html"
+    
+    if index_file.exists():
+        # If requesting a file that exists, serve it
+        requested_file = static_dir / full_path
+        if requested_file.exists() and requested_file.is_file():
+            return FileResponse(str(requested_file))
+        # Otherwise serve index.html for SPA routing
+        return FileResponse(str(index_file))
+    else:
+        raise HTTPException(status_code=404, detail="Frontend not available")
 
 
 # Cleanup browser on shutdown

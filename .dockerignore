@@ -1,0 +1,77 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+README.md
+DEPLOYMENT*.md
+RAILWAY*.md
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Node modules (will be installed in container)
+node_modules/
+frontend/node_modules/
+
+# Python virtual environment
+venv/
+env/
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+backend/logs/
+backend/backend/logs/
+
+# Test results
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+playwright/.auth/
+
+# Build outputs
+dist/
+build/
+frontend/dist/
+
+# Railway
+.railway/
+
+# Uploads
+uploads/
+*.csv
+*.xlsx
+*.xls
+
+# Cache
+.cache/
+.npm/
+.pnpm-store/
+

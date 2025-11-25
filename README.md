@@ -44,6 +44,8 @@ NZ-PROPPER/
 │   ├── package.json
 │   └── Dockerfile
 ├── docker-compose.yml
+├── Dockerfile          # Unified Dockerfile for Railway deployment
+├── railway.json        # Railway deployment configuration
 └── README.md
 ```
 
@@ -189,36 +191,30 @@ Process uploaded file, remove duplicates, and calculate flip values.
 
 ## Deployment
 
-### Railway Deployment
+### Railway Deployment (Unified - Single Service)
 
-1. Install Railway CLI:
-```bash
-npm i -g @railway/cli
-```
+The project is configured for unified deployment on Railway, where both frontend and backend run in a single service with one URL.
 
-2. Login to Railway:
-```bash
-railway login
-```
+1. **Connect GitHub Repository to Railway:**
+   - Go to [Railway](https://railway.app)
+   - Click "New Project"
+   - Select "Deploy from GitHub repo"
+   - Choose your repository: `NZ-Propper-Demo`
 
-3. Initialize Railway project:
-```bash
-railway init
-```
+2. **Railway will automatically:**
+   - Detect the `Dockerfile` at the root
+   - Build the unified container (frontend + backend)
+   - Deploy to a single service
+   - Provide one URL for the entire application
 
-4. Deploy backend:
-```bash
-cd backend
-railway up
-```
+3. **The unified deployment:**
+   - Builds the React frontend during Docker build
+   - Serves frontend static files via FastAPI
+   - All API routes are under `/api/*`
+   - Frontend routes are handled by FastAPI's catch-all route
+   - Single port, single URL, single service
 
-5. Deploy frontend:
-```bash
-cd frontend
-railway up
-```
-
-The `railway.json` file contains the deployment configuration.
+The `railway.json` file contains the deployment configuration for the unified service.
 
 ### Environment Variables
 

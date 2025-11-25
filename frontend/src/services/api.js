@@ -1,4 +1,6 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Use relative URLs for unified deployment (same domain for frontend and backend)
+// In development, VITE_API_URL can be set to proxy through Vite dev server
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 export const uploadFile = async (file) => {
   const formData = new FormData();
