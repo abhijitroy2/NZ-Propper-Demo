@@ -80,6 +80,9 @@ class PropertyScrapeResult:
     area: Optional[str] = None  # Property area (e.g., "431 m2")
     rental_yield_percentage: Optional[float] = None  # Rental yield percentage (e.g., 4.1)
     rental_yield_range: Optional[Tuple[float, float]] = None  # Weekly rent range (low, high)
+    property_address: Optional[str] = None  # Property address
+    property_title: Optional[str] = None  # Property title/description
+    price: Optional[str] = None  # Asking price or price information
     
     def __post_init__(self):
         if self.sold_prices is None:
@@ -216,6 +219,9 @@ class PropertyScraper:
                         result.area = cache_entry.get('area')
                         result.rental_yield_percentage = cache_entry.get('rental_yield_percentage')
                         result.rental_yield_range = cache_entry.get('rental_yield_range')
+                        result.property_address = cache_entry.get('property_address')
+                        result.property_title = cache_entry.get('property_title')
+                        result.price = cache_entry.get('price')
                         return result
                     else:
                         logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours)")
@@ -240,6 +246,9 @@ class PropertyScraper:
                 'area': result.area,
                 'rental_yield_percentage': result.rental_yield_percentage,
                 'rental_yield_range': result.rental_yield_range,
+                'property_address': result.property_address,
+                'property_title': result.property_title,
+                'price': result.price,
                 'timestamp': datetime.now().isoformat()
             }
             self.cache[property_link] = cache_entry
@@ -552,6 +561,154 @@ class PropertyScraper:
         
         return (yield_percentage, weekly_rent_range)
     
+    def _extract_property_address(self, page_html: str, page_text: str) -> Optional[str]:
+        """
+        Extract property address from page.
+        Looks for address patterns in headings, titles, or specific sections.
+        """
+        try:
+            # Common patterns for address extraction
+            # Pattern 1: Look for address-like text (numbers followed by street name)
+            address_patterns = [
+                r'(\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Place|Pl|Terrace|Tce|Court|Ct|Grove|Gv|Close|Cl|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Highway|Hwy|Mall|Circle|Cir)[^,\n]*(?:,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)?)',
+                r'(\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Place|Pl|Terrace|Tce|Court|Ct|Grove|Gv|Close|Cl|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Highway|Hwy|Mall|Circle|Cir))',
+            ]
+            
+            for pattern in address_patterns:
+                match = re.search(pattern, page_text)
+                if match:
+                    address = match.group(1).strip()
+                    if len(address) > 5 and len(address) < 200:  # Reasonable address length
+                        logger.debug(f"[SCRAPER] Found property address: {address}")
+                        return address
+            
+            # Pattern 2: Look for h1 or title tags that might contain address
+            title_patterns = [
+                r'<h1[^>]*>([^<]+)</h1>',
+                r'<title>([^<]+)</title>',
+                r'property[^>]*address[^>]*>([^<]+)',
+            ]
+            
+            for pattern in title_patterns:
+                match = re.search(pattern, page_html, re.IGNORECASE)
+                if match:
+                    text = match.group(1).strip()
+                    # Check if it looks like an address
+                    if re.search(r'\d+\s+[A-Z]', text) and len(text) < 200:
+                        logger.debug(f"[SCRAPER] Found property address in title: {text}")
+                        return text
+            
+        except Exception as e:
+            logger.warning(f"Error extracting property address: {e}")
+        
+        return None
+    
+    def _extract_property_title(self, page_html: str, page_text: str) -> Optional[str]:
+        """
+        Extract property title/description from page.
+        Looks for heading text or description sections.
+        """
+        try:
+            # Pattern 1: Look for h1 or main heading
+            title_patterns = [
+                r'<h1[^>]*>([^<]+)</h1>',
+                r'<h2[^>]*>([^<]+)</h2>',
+                r'property[^>]*title[^>]*>([^<]+)',
+                r'listing[^>]*title[^>]*>([^<]+)',
+            ]
+            
+            for pattern in title_patterns:
+                match = re.search(pattern, page_html, re.IGNORECASE)
+                if match:
+                    title = match.group(1).strip()
+                    # Filter out addresses (they usually have numbers)
+                    if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 10 and len(title) < 300:
+                        logger.debug(f"[SCRAPER] Found property title: {title}")
+                        return title
+            
+            # Pattern 2: Look for description text near the top of the page
+            # Get first 2000 chars and look for descriptive text
+            page_start = page_text[:2000]
+            # Look for sentences that don't start with numbers (not addresses)
+            sentences = re.findall(r'([A-Z][^.!?]{20,200}[.!?])', page_start)
+            if sentences:
+                # Take first sentence that looks like a description
+                for sentence in sentences[:3]:
+                    sentence = sentence.strip()
+                    if not re.search(r'^\d+\s+[A-Z]', sentence) and len(sentence) > 20:
+                        logger.debug(f"[SCRAPER] Found property title from description: {sentence}")
+                        return sentence
+            
+        except Exception as e:
+            logger.warning(f"Error extracting property title: {e}")
+        
+        return None
+    
+    def _extract_price(self, page_html: str, page_text: str) -> Optional[str]:
+        """
+        Extract asking price or price information from page.
+        Looks for price patterns like "Asking price $599,900" or "$599,900" etc.
+        """
+        try:
+            # Pattern 1: Look for "Asking price" followed by amount
+            asking_patterns = [
+                r'asking\s+price[^$]*\$?\s*([\d,]+)',
+                r'price[^$]*\$?\s*([\d,]+)',
+                r'\$\s*([\d,]+)\s*(?:asking|price|on\s+request|or\s+nearest\s+offer)',
+            ]
+            
+            for pattern in asking_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    price_value = match.group(1).replace(',', '')
+                    try:
+                        price_num = float(price_value)
+                        if 10000 <= price_num <= 50000000:  # Reasonable price range
+                            price_str = f"Asking price ${price_num:,.0f}"
+                            logger.debug(f"[SCRAPER] Found asking price: {price_str}")
+                            return price_str
+                    except ValueError:
+                        continue
+            
+            # Pattern 2: Look for large dollar amounts near "price" keywords
+            price_section_patterns = [
+                r'price[^$]{0,100}\$?\s*([\d,]{4,})',
+                r'\$\s*([\d,]{4,})\s*(?:price|asking|buy|purchase)',
+            ]
+            
+            for pattern in price_section_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    price_value = match.group(1).replace(',', '')
+                    try:
+                        price_num = float(price_value)
+                        if 10000 <= price_num <= 50000000:
+                            price_str = f"${price_num:,.0f}"
+                            logger.debug(f"[SCRAPER] Found price: {price_str}")
+                            return price_str
+                    except ValueError:
+                        continue
+            
+            # Pattern 3: Look for auction or deadline sale info
+            auction_patterns = [
+                r'(auction[^$]*\$?\s*[\d,]+)',
+                r'(deadline\s+sale[^$]*\$?\s*[\d,]+)',
+                r'(tender[^$]*\$?\s*[\d,]+)',
+            ]
+            
+            for pattern in auction_patterns:
+                match = re.search(pattern, page_text, re.IGNORECASE)
+                if match:
+                    price_info = match.group(1).strip()
+                    if len(price_info) < 100:
+                        logger.debug(f"[SCRAPER] Found price info: {price_info}")
+                        return price_info
+            
+        except Exception as e:
+            logger.warning(f"Error extracting price: {e}")
+        
+        return None
+    
     def _scrape_property_data_sync(self, property_link: str) -> PropertyScrapeResult:
         """
         Unified synchronous scraping method for Windows.
@@ -683,11 +840,20 @@ class PropertyScraper:
                     else:
                         logger.warning(f"[SCRAPER SYNC] Could not extract HomesEstimate range")
                     
-                    # Extract property details: bedrooms, bathrooms, area
-                    logger.info(f"[SCRAPER SYNC] Extracting property details (bedrooms, bathrooms, area)...")
+                    # Extract property details: address, title, price, bedrooms, bathrooms, area
+                    logger.info(f"[SCRAPER SYNC] Extracting property details...")
+                    result.property_address = self._extract_property_address(page_html, page_text)
+                    result.property_title = self._extract_property_title(page_html, page_text)
+                    result.price = self._extract_price(page_html, page_text)
                     result.bedrooms = self._extract_bedrooms(page_html, page_text)
                     result.bathrooms = self._extract_bathrooms(page_html, page_text)
                     result.area = self._extract_area(page_text)
+                    if result.property_address:
+                        logger.info(f"[SCRAPER SYNC] Found property address: {result.property_address}")
+                    if result.property_title:
+                        logger.info(f"[SCRAPER SYNC] Found property title: {result.property_title}")
+                    if result.price:
+                        logger.info(f"[SCRAPER SYNC] Found price: {result.price}")
                     if result.bedrooms:
                         logger.info(f"[SCRAPER SYNC] Found bedrooms: {result.bedrooms}")
                     if result.bathrooms:
@@ -1614,11 +1780,20 @@ class PropertyScraper:
                     result.homes_estimate = (low + high) / 2
                     logger.info(f"[SCRAPER] Found HomesEstimate range: ${low:,.0f} - ${high:,.0f}")
                 
-                # Extract property details: bedrooms, bathrooms, area
-                logger.info(f"[SCRAPER] Extracting property details (bedrooms, bathrooms, area)...")
+                # Extract property details: address, title, price, bedrooms, bathrooms, area
+                logger.info(f"[SCRAPER] Extracting property details...")
+                result.property_address = self._extract_property_address(page_html, page_text)
+                result.property_title = self._extract_property_title(page_html, page_text)
+                result.price = self._extract_price(page_html, page_text)
                 result.bedrooms = self._extract_bedrooms(page_html, page_text)
                 result.bathrooms = self._extract_bathrooms(page_html, page_text)
                 result.area = self._extract_area(page_text)
+                if result.property_address:
+                    logger.info(f"[SCRAPER] Found property address: {result.property_address}")
+                if result.property_title:
+                    logger.info(f"[SCRAPER] Found property title: {result.property_title}")
+                if result.price:
+                    logger.info(f"[SCRAPER] Found price: {result.price}")
                 if result.bedrooms:
                     logger.info(f"[SCRAPER] Found bedrooms: {result.bedrooms}")
                 if result.bathrooms:

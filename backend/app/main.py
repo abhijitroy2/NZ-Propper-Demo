@@ -215,9 +215,9 @@ async def analyze_single_property(request: AnalyzeSingleRequest):
         # Extract property details from scrape result
         property_data = {
             "Property Link": url,
-            "Property Address": None,  # Will be extracted from page if possible
-            "Property Title": None,   # Will be extracted from page if possible
-            "Price": None,            # Will be extracted from page if possible
+            "Property Address": scrape_result.property_address,
+            "Property Title": scrape_result.property_title,
+            "Price": scrape_result.price,
             "Bedrooms": scrape_result.bedrooms,
             "Bathrooms": scrape_result.bathrooms,
             "Area": scrape_result.area,
