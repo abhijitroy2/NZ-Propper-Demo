@@ -107,11 +107,24 @@ class PropertyScraper:
         """Load cache from JSON file"""
         try:
             if self._cache_file.exists():
+                # Check if file is empty
+                if self._cache_file.stat().st_size == 0:
+                    logger.info(f"[SCRAPER] Cache file is empty, starting with empty cache")
+                    self.cache = {}
+                    return
+                
                 with open(self._cache_file, 'r', encoding='utf-8') as f:
-                    cache_data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        logger.info(f"[SCRAPER] Cache file is empty, starting with empty cache")
+                        self.cache = {}
+                        return
+                    
+                    cache_data = json.loads(content)
                     # Convert timestamp strings back to datetime objects
                     for key, value in cache_data.items():
                         if isinstance(value, (list, tuple)) and len(value) == 2:
+                            # Old format: [estimate_value, timestamp_str]
                             estimate_value, timestamp_str = value
                             try:
                                 timestamp = datetime.fromisoformat(timestamp_str)
@@ -119,9 +132,15 @@ class PropertyScraper:
                             except (ValueError, TypeError) as e:
                                 logger.warning(f"[SCRAPER] Failed to parse cache entry for {key}: {e}")
                                 continue
+                        elif isinstance(value, dict):
+                            # New format: dict with PropertyScrapeResult data
+                            self.cache[key] = value
                 logger.info(f"[SCRAPER] Loaded {len(self.cache)} entries from cache file: {self._cache_file}")
             else:
                 logger.info(f"[SCRAPER] No cache file found at {self._cache_file}, starting with empty cache")
+        except json.JSONDecodeError as e:
+            logger.warning(f"[SCRAPER] Cache file contains invalid JSON, starting with empty cache: {e}")
+            self.cache = {}  # Start with empty cache on JSON error
         except Exception as e:
             logger.error(f"[SCRAPER] Failed to load cache from file: {e}", exc_info=True)
             self.cache = {}  # Start with empty cache on error
@@ -288,10 +307,18 @@ class PropertyScraper:
         Returns None if not found.
         """
         try:
-            # Look for HomesEstimate pattern
+            # Look for HomesEstimate pattern with more flexible matching
             patterns = [
+                # Exact "HomesEstimate" with various formats
                 (r'HomesEstimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'HomesEstimate pattern'),
+                (r'HomesEstimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*to\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'HomesEstimate to pattern'),
+                # Property estimate variations
                 (r'Property estimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Property estimate pattern'),
+                (r'Property estimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*to\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Property estimate to pattern'),
+                # More generic patterns
+                (r'estimate[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*-\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Generic estimate pattern'),
+                # Look for price ranges near "estimate" keywords
+                (r'(?:Homes|Property|Estimated)[^$]*\$?\s*([\d,]+)\s*([KMkm]?)\s*[-–—]\s*\$?\s*([\d,]+)\s*([KMkm]?)', 'Flexible estimate pattern'),
             ]
             
             def parse_value(value_str: str, suffix: str) -> float:
@@ -303,13 +330,24 @@ class PropertyScraper:
                 return value
             
             for pattern, pattern_name in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
+                match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
                 if match:
                     val1_str, suffix1, val2_str, suffix2 = match.groups()
-                    val1 = parse_value(val1_str, suffix1)
-                    val2 = parse_value(val2_str, suffix2)
-                    # Return (low, high) ensuring low < high
-                    return (min(val1, val2), max(val1, val2))
+                    try:
+                        val1 = parse_value(val1_str, suffix1)
+                        val2 = parse_value(val2_str, suffix2)
+                        # Validate reasonable values (between 10k and 50M)
+                        if 10000 <= val1 <= 50000000 and 10000 <= val2 <= 50000000:
+                            # Return (low, high) ensuring low < high
+                            result = (min(val1, val2), max(val1, val2))
+                            logger.debug(f"[SCRAPER] Extracted range using pattern '{pattern_name}': ${result[0]:,.0f} - ${result[1]:,.0f}")
+                            return result
+                    except (ValueError, TypeError) as e:
+                        logger.debug(f"[SCRAPER] Failed to parse values from pattern '{pattern_name}': {e}")
+                        continue
+            
+            # If no pattern matched, log a sample of the text for debugging
+            logger.debug(f"[SCRAPER] No HomesEstimate pattern matched. Text sample (first 1000 chars): {text[:1000]}")
             
         except Exception as e:
             logger.warning(f"Error extracting HomesEstimate range: {e}")
