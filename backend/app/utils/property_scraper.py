@@ -391,9 +391,34 @@ class PropertyScraper:
                         logger.warning(f"[SCRAPER SYNC] Load timeout, trying domcontentloaded: {load_error}")
                         page.goto(property_link, wait_until='domcontentloaded', timeout=30000)
                     
-                    # Wait longer for dynamic content to fully load
+                    # Wait for page to be interactive and content to load
+                    logger.info(f"[SCRAPER SYNC] Waiting for page to be interactive...")
+                    time.sleep(3)
+                    
+                    # Wait for property content to appear (try multiple selectors)
+                    content_selectors = [
+                        '[class*="property"]',
+                        '[class*="listing"]',
+                        '[data-testid*="property"]',
+                        'main',
+                        '[role="main"]',
+                    ]
+                    content_found = False
+                    for selector in content_selectors:
+                        try:
+                            page.wait_for_selector(selector, timeout=10000, state='visible')
+                            content_found = True
+                            logger.info(f"[SCRAPER SYNC] Found content using selector: {selector}")
+                            break
+                        except Exception:
+                            continue
+                    
+                    if not content_found:
+                        logger.warning(f"[SCRAPER SYNC] Property content selectors not found, continuing anyway...")
+                    
+                    # Wait for dynamic content to fully load
                     logger.info(f"[SCRAPER SYNC] Waiting for dynamic content to load...")
-                    time.sleep(5)  # Increased from 2 to 5 seconds
+                    time.sleep(5)
                     
                     # Scroll page to trigger lazy loading
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -401,12 +426,16 @@ class PropertyScraper:
                     page.evaluate("window.scrollTo(0, 0)")
                     time.sleep(2)
                     
-                    # Get page text for HomesEstimate extraction
+                    # Get page HTML (not just text) for better extraction
+                    page_html = page.content()
                     page_text = page.text_content('body') or ''
                     
-                    # Extract HomesEstimate range
+                    # Extract HomesEstimate range from HTML (more reliable than text)
                     logger.info(f"[SCRAPER SYNC] Extracting HomesEstimate range...")
-                    estimate_range = self._extract_homes_estimate_range(page_text)
+                    # Try HTML first (more reliable), then fall back to text
+                    estimate_range = self._extract_homes_estimate_range(page_html)
+                    if not estimate_range:
+                        estimate_range = self._extract_homes_estimate_range(page_text)
                     if estimate_range:
                         low, high = estimate_range
                         result.homes_estimate_range = estimate_range
@@ -519,17 +548,25 @@ class PropertyScraper:
                     
                     while click_count < max_clicks:
                         # Extract sold prices from current view
-                        page_html = page.content()
+                        page_html_current = page.content()
                         
-                        # Extract all sold prices from page HTML
+                        # Extract all sold prices from page HTML with more patterns
                         sold_patterns = [
-                            r'SOLD:\s*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            # Patterns matching actual HTML structure
+                            r'SOLD[:\s]*\$?\s*([\d,]+)\s*([KMkm]?)',
                             r'\$\s*([\d,]+)\s*([KMkm]?)\s*(?:SOLD|sold)',
+                            r'(?:Sold|SOLD)[:\s]*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            # Look for price patterns near "sold" text
+                            r'(?:sold|Sold|SOLD)[^<]*\$?\s*([\d,]+)\s*([KMkm]?)',
+                            # Look for price in divs/spans near sold indicators
+                            r'<[^>]*sold[^>]*>[^<]*\$?\s*([\d,]+)\s*([KMkm]?)[^<]*</',
+                            # Generic price patterns that might be sold prices (3+ digits)
+                            r'\$\s*([\d]{3,}[\d,]*)\s*([KMkm]?)',
                         ]
                         
                         prices_before = len(result.sold_prices)
                         for pattern in sold_patterns:
-                            matches = re.finditer(pattern, page_html, re.IGNORECASE)
+                            matches = re.finditer(pattern, page_html_current, re.IGNORECASE)
                             for match in matches:
                                 value_str = match.group(1)
                                 suffix = match.group(2) if len(match.groups()) > 1 else ''
