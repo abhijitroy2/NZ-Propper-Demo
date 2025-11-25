@@ -101,7 +101,7 @@ class PropertyScraper:
     def __init__(self):
         self.browser: Optional[Browser] = None
         self.cache: Dict[str, Tuple[float, datetime]] = {}
-        self.cache_expiration_hours = 24
+        self.cache_expiration_hours = 7 * 24  # 7 days cache expiration
         self.last_request_time: Optional[datetime] = None
         self.min_delay_seconds = 2
         self.max_delay_seconds = 5
@@ -110,6 +110,7 @@ class PropertyScraper:
         self._cache_file = cache_file
         # Load cache from file on initialization
         self._load_cache()
+        logger.info(f"[SCRAPER] Cache expiration set to {self.cache_expiration_hours} hours (7 days)")
     
     def _load_cache(self):
         """Load cache from JSON file"""
@@ -209,7 +210,8 @@ class PropertyScraper:
                     cached_time = datetime.fromisoformat(timestamp_str)
                     age_hours = (datetime.now() - cached_time).total_seconds() / 3600
                     if age_hours < self.cache_expiration_hours:
-                        logger.info(f"[SCRAPER] Cache HIT for {property_link} (age: {age_hours:.1f} hours)")
+                        logger.info(f"[SCRAPER] Cache HIT for {property_link} (age: {age_hours:.1f} hours, expires in {self.cache_expiration_hours - age_hours:.1f} hours)")
+                        logger.info(f"[SCRAPER] Using cached data - saved compute cost!")
                         result = PropertyScrapeResult()
                         result.homes_estimate = cache_entry.get('homes_estimate')
                         result.homes_estimate_range = cache_entry.get('homes_estimate_range')
@@ -224,7 +226,7 @@ class PropertyScraper:
                         result.price = cache_entry.get('price')
                         return result
                     else:
-                        logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours)")
+                        logger.info(f"[SCRAPER] Cache EXPIRED for {property_link} (age: {age_hours:.1f} hours, limit: {self.cache_expiration_hours} hours)")
                         return None
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[SCRAPER] Failed to parse cache timestamp: {e}")
@@ -235,6 +237,8 @@ class PropertyScraper:
     def _save_result_to_cache(self, property_link: str, result: PropertyScrapeResult):
         """
         Save PropertyScrapeResult to cache.
+        Persists all scraped data to reduce compute costs.
+        Cache is valid for 7 days.
         """
         try:
             cache_entry = {
@@ -253,7 +257,8 @@ class PropertyScraper:
             }
             self.cache[property_link] = cache_entry
             self._save_cache()
-            logger.info(f"[SCRAPER] Cached property data for {property_link}")
+            logger.info(f"[SCRAPER] Cached property data for {property_link} (valid for 7 days)")
+            logger.info(f"[SCRAPER] Cache file location: {self._cache_file.absolute()}")
             _scraper_file_handler.flush()
         except Exception as e:
             logger.error(f"[SCRAPER] Failed to save result to cache: {e}", exc_info=True)
