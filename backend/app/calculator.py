@@ -2,6 +2,7 @@ import re
 import asyncio
 import logging
 import statistics
+import sys
 from typing import Dict, Any, Optional, Tuple
 from .models import CalculationResult, PropertyInput
 from .utils.property_scraper import scrape_property_estimate, scrape_sold_properties, get_scraper
@@ -180,38 +181,59 @@ class FlipCalculator:
             
             # First, get HomesEstimate range for filtering
             logger.info(f"[CALCULATOR] Getting HomesEstimate range for filtering...")
-            
-            # Use scraper's browser to get HomesEstimate range
-            browser = await scraper._get_browser()
-            context = await browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                viewport={'width': 1920, 'height': 1080}
-            )
-            page = None
             upper_quartile = None
             
-            try:
-                page = await context.new_page()
-                await page.goto(property_link, wait_until='load', timeout=60000)
-                await asyncio.sleep(2)
-                page_text = await page.text_content('body') or ''
+            # On Windows, use sync API in thread pool to avoid asyncio subprocess issues
+            if sys.platform == 'win32':
+                logger.info(f"[CALCULATOR] Using sync API to get HomesEstimate range (Windows)")
+                from concurrent.futures import ThreadPoolExecutor
+                if scraper._executor is None:
+                    scraper._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="playwright")
                 
-                # Extract HomesEstimate range
-                estimate_range = scraper._extract_homes_estimate_range(page_text)
+                loop = asyncio.get_event_loop()
+                try:
+                    estimate_range = await loop.run_in_executor(
+                        scraper._executor, scraper._get_homes_estimate_range_sync, property_link
+                    )
+                    if estimate_range:
+                        low, high = estimate_range
+                        upper_quartile = high  # Upper quartile is the high end of the range
+                        logger.info(f"[CALCULATOR] HomesEstimate range: ${low:,.0f} - ${high:,.0f}, upper quartile: ${upper_quartile:,.0f}")
+                    else:
+                        logger.warning(f"[CALCULATOR] Could not extract HomesEstimate range, will not filter sold prices")
+                except Exception as e:
+                    logger.warning(f"[CALCULATOR] Error getting HomesEstimate range: {e}")
+            else:
+                # Non-Windows: use async API
+                browser = await scraper._get_browser()
+                context = await browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = None
                 
-                if estimate_range:
-                    low, high = estimate_range
-                    upper_quartile = high  # Upper quartile is the high end of the range
-                    logger.info(f"[CALCULATOR] HomesEstimate range: ${low:,.0f} - ${high:,.0f}, upper quartile: ${upper_quartile:,.0f}")
-                else:
-                    logger.warning(f"[CALCULATOR] Could not extract HomesEstimate range, will not filter sold prices")
-                
-            except Exception as e:
-                logger.warning(f"[CALCULATOR] Error getting HomesEstimate range: {e}")
-            finally:
-                if page:
-                    await page.close()
-                await context.close()
+                try:
+                    page = await context.new_page()
+                    await page.goto(property_link, wait_until='load', timeout=60000)
+                    await asyncio.sleep(2)
+                    page_text = await page.text_content('body') or ''
+                    
+                    # Extract HomesEstimate range
+                    estimate_range = scraper._extract_homes_estimate_range(page_text)
+                    
+                    if estimate_range:
+                        low, high = estimate_range
+                        upper_quartile = high  # Upper quartile is the high end of the range
+                        logger.info(f"[CALCULATOR] HomesEstimate range: ${low:,.0f} - ${high:,.0f}, upper quartile: ${upper_quartile:,.0f}")
+                    else:
+                        logger.warning(f"[CALCULATOR] Could not extract HomesEstimate range, will not filter sold prices")
+                    
+                except Exception as e:
+                    logger.warning(f"[CALCULATOR] Error getting HomesEstimate range: {e}")
+                finally:
+                    if page:
+                        await page.close()
+                    await context.close()
             
             # Scrape sold properties
             logger.info(f"[CALCULATOR] Scraping sold properties from {property_link}...")

@@ -234,6 +234,48 @@ class PropertyScraper:
         
         return None
     
+    def _get_homes_estimate_range_sync(self, property_link: str) -> Optional[Tuple[float, float]]:
+        """
+        Synchronous version to get HomesEstimate range for Windows.
+        """
+        from playwright.sync_api import sync_playwright
+        import time
+        
+        try:
+            logger.info(f"[SCRAPER SYNC] Getting HomesEstimate range for: {property_link}")
+            
+            playwright = sync_playwright().start()
+            browser = playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            
+            try:
+                context = browser.new_context(
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    viewport={'width': 1920, 'height': 1080}
+                )
+                page = context.new_page()
+                
+                try:
+                    page.goto(property_link, wait_until='load', timeout=60000)
+                    time.sleep(2)
+                    page_text = page.text_content('body') or ''
+                    
+                    estimate_range = self._extract_homes_estimate_range(page_text)
+                    return estimate_range
+                    
+                finally:
+                    page.close()
+                    context.close()
+            finally:
+                browser.close()
+                playwright.stop()
+                
+        except Exception as e:
+            logger.error(f"[SCRAPER SYNC] Error getting HomesEstimate range: {e}", exc_info=True)
+            return None
+    
     def _parse_sold_price(self, text: str) -> Optional[float]:
         """
         Parse sold price from text like "SOLD: $1,350,000" or "$722,000".
