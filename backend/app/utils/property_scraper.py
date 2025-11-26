@@ -611,38 +611,60 @@ class PropertyScraper:
     def _extract_property_title(self, page_html: str, page_text: str) -> Optional[str]:
         """
         Extract property title/description from page.
-        Looks for heading text or description sections.
+        Looks for the main listing title, avoiding generic labels like "Listing Description".
         """
         try:
-            # Pattern 1: Look for h1 or main heading
-            title_patterns = [
-                r'<h1[^>]*>([^<]+)</h1>',
-                r'<h2[^>]*>([^<]+)</h2>',
-                r'property[^>]*title[^>]*>([^<]+)',
-                r'listing[^>]*title[^>]*>([^<]+)',
+            # Pattern 1: Look for h1 tags, but exclude generic ones
+            h1_pattern = r'<h1[^>]*>([^<]+)</h1>'
+            h1_matches = re.finditer(h1_pattern, page_html, re.IGNORECASE)
+            for match in h1_matches:
+                title = match.group(1).strip()
+                # Skip generic labels
+                generic_labels = ['listing description', 'property details', 'description', 'overview']
+                if any(label in title.lower() for label in generic_labels):
+                    continue
+                # Filter out addresses (they usually start with numbers)
+                if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 5 and len(title) < 300:
+                    logger.debug(f"[SCRAPER] Found property title from h1: {title}")
+                    return title
+            
+            # Pattern 2: Look for title in specific data attributes or classes
+            # TradeMe often uses data attributes for the main title
+            title_selectors = [
+                r'<[^>]*data-testid="listing-title"[^>]*>([^<]+)</',
+                r'<[^>]*class="[^"]*title[^"]*"[^>]*>([^<]{10,200})</',
+                r'<[^>]*itemprop="name"[^>]*>([^<]+)</',
             ]
             
-            for pattern in title_patterns:
+            for pattern in title_selectors:
                 match = re.search(pattern, page_html, re.IGNORECASE)
                 if match:
                     title = match.group(1).strip()
-                    # Filter out addresses (they usually have numbers)
-                    if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 10 and len(title) < 300:
-                        logger.debug(f"[SCRAPER] Found property title: {title}")
+                    # Skip generic labels
+                    generic_labels = ['listing description', 'property details', 'description']
+                    if any(label in title.lower() for label in generic_labels):
+                        continue
+                    if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 5 and len(title) < 300:
+                        logger.debug(f"[SCRAPER] Found property title from selector: {title}")
                         return title
             
-            # Pattern 2: Look for description text near the top of the page
-            # Get first 2000 chars and look for descriptive text
-            page_start = page_text[:2000]
-            # Look for sentences that don't start with numbers (not addresses)
-            sentences = re.findall(r'([A-Z][^.!?]{20,200}[.!?])', page_start)
-            if sentences:
-                # Take first sentence that looks like a description
-                for sentence in sentences[:3]:
-                    sentence = sentence.strip()
-                    if not re.search(r'^\d+\s+[A-Z]', sentence) and len(sentence) > 20:
-                        logger.debug(f"[SCRAPER] Found property title from description: {sentence}")
-                        return sentence
+            # Pattern 3: Look for bold/large text near the address (main title is usually prominent)
+            # Find address first, then look for text before it
+            address_match = re.search(r'(\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Place|Pl|Terrace|Tce|Court|Ct|Grove|Gv|Close|Cl|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Highway|Hwy|Mall|Circle|Cir))', page_text)
+            if address_match:
+                address_pos = address_match.start()
+                # Look for text before the address (within 500 chars)
+                text_before = page_text[max(0, address_pos - 500):address_pos]
+                # Find lines that look like titles (not addresses, not generic labels)
+                lines = text_before.split('\n')
+                for line in reversed(lines):  # Check from closest to address
+                    line = line.strip()
+                    if len(line) > 10 and len(line) < 300:
+                        generic_labels = ['listing description', 'property details', 'description', 'overview', 'listed:', 'price']
+                        if not any(label in line.lower() for label in generic_labels):
+                            if not re.search(r'^\d+\s+[A-Z]', line):
+                                logger.debug(f"[SCRAPER] Found property title before address: {line}")
+                                return line
             
         except Exception as e:
             logger.warning(f"Error extracting property title: {e}")
@@ -652,47 +674,64 @@ class PropertyScraper:
     def _extract_price(self, page_html: str, page_text: str) -> Optional[str]:
         """
         Extract asking price or price information from page.
-        Looks for price patterns like "Asking price $599,900" or "$599,900" etc.
+        Prioritizes the actual listing price, not estimates or other prices on the page.
         """
         try:
-            # Pattern 1: Look for "Asking price" followed by amount
-            asking_patterns = [
-                r'asking\s+price[^$]*\$?\s*([\d,]+)',
-                r'price[^$]*\$?\s*([\d,]+)',
-                r'\$\s*([\d,]+)\s*(?:asking|price|on\s+request|or\s+nearest\s+offer)',
+            # First, check for common "no price" scenarios
+            no_price_patterns = [
+                r'price\s+by\s+negotiation',
+                r'price\s+on\s+application',
+                r'poa',
+                r'contact\s+agent',
+                r'by\s+negotiation',
             ]
             
-            for pattern in asking_patterns:
+            for pattern in no_price_patterns:
                 match = re.search(pattern, page_text, re.IGNORECASE)
                 if match:
-                    price_value = match.group(1).replace(',', '')
-                    try:
-                        price_num = float(price_value)
-                        if 10000 <= price_num <= 50000000:  # Reasonable price range
-                            price_str = f"Asking price ${price_num:,.0f}"
-                            logger.debug(f"[SCRAPER] Found asking price: {price_str}")
-                            return price_str
-                    except ValueError:
-                        continue
+                    price_info = match.group(0).strip()
+                    logger.debug(f"[SCRAPER] Found price type: {price_info}")
+                    return price_info.title()  # Capitalize properly
             
-            # Pattern 2: Look for large dollar amounts near "price" keywords
-            price_section_patterns = [
-                r'price[^$]{0,100}\$?\s*([\d,]{4,})',
-                r'\$\s*([\d,]{4,})\s*(?:price|asking|buy|purchase)',
-            ]
+            # Pattern 1: Look for "Asking price" specifically (most reliable)
+            asking_pattern = r'asking\s+price[^$]*\$?\s*([\d,]+)'
+            match = re.search(asking_pattern, page_text, re.IGNORECASE)
+            if match:
+                price_value = match.group(1).replace(',', '')
+                try:
+                    price_num = float(price_value)
+                    if 10000 <= price_num <= 50000000:  # Reasonable price range
+                        price_str = f"Asking price ${price_num:,.0f}"
+                        logger.debug(f"[SCRAPER] Found asking price: {price_str}")
+                        return price_str
+                except ValueError:
+                    pass
             
-            for pattern in price_section_patterns:
-                match = re.search(pattern, page_text, re.IGNORECASE)
-                if match:
-                    price_value = match.group(1).replace(',', '')
-                    try:
-                        price_num = float(price_value)
-                        if 10000 <= price_num <= 50000000:
-                            price_str = f"${price_num:,.0f}"
-                            logger.debug(f"[SCRAPER] Found price: {price_str}")
-                            return price_str
-                    except ValueError:
-                        continue
+            # Pattern 2: Look for price in the main listing area (not in estimates section)
+            # Find the main price section by looking for price near address or title
+            address_match = re.search(r'(\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Place|Pl|Terrace|Tce|Court|Ct|Grove|Gv|Close|Cl|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Highway|Hwy|Mall|Circle|Cir))', page_text)
+            if address_match:
+                address_pos = address_match.start()
+                # Look for price within 300 chars after the address (main listing area)
+                text_after_address = page_text[address_pos:address_pos + 300]
+                # Look for price patterns in this section
+                price_patterns = [
+                    r'\$\s*([\d,]{4,})\s*(?:asking|price|buy|purchase|on\s+request)',
+                    r'price[^$]{0,50}\$?\s*([\d,]{4,})',
+                ]
+                
+                for pattern in price_patterns:
+                    match = re.search(pattern, text_after_address, re.IGNORECASE)
+                    if match:
+                        price_value = match.group(1).replace(',', '')
+                        try:
+                            price_num = float(price_value)
+                            if 10000 <= price_num <= 50000000:
+                                price_str = f"${price_num:,.0f}"
+                                logger.debug(f"[SCRAPER] Found price near address: {price_str}")
+                                return price_str
+                        except ValueError:
+                            continue
             
             # Pattern 3: Look for auction or deadline sale info
             auction_patterns = [
@@ -708,6 +747,24 @@ class PropertyScraper:
                     if len(price_info) < 100:
                         logger.debug(f"[SCRAPER] Found price info: {price_info}")
                         return price_info
+            
+            # Pattern 4: Last resort - look for large dollar amounts, but exclude estimate sections
+            # Avoid prices in "HomesEstimate" or "Property estimate" sections
+            page_without_estimates = re.sub(r'HomesEstimate[^$]*\$[\d,]+[^$]*\$[\d,]+', '', page_text, flags=re.IGNORECASE)
+            page_without_estimates = re.sub(r'Property\s+estimate[^$]*\$[\d,]+[^$]*\$[\d,]+', '', page_without_estimates, flags=re.IGNORECASE)
+            
+            price_pattern = r'\$\s*([\d,]{4,})\s*(?:price|asking|buy|purchase)'
+            match = re.search(price_pattern, page_without_estimates, re.IGNORECASE)
+            if match:
+                price_value = match.group(1).replace(',', '')
+                try:
+                    price_num = float(price_value)
+                    if 10000 <= price_num <= 50000000:
+                        price_str = f"${price_num:,.0f}"
+                        logger.debug(f"[SCRAPER] Found price (excluding estimates): {price_str}")
+                        return price_str
+                except ValueError:
+                    pass
             
         except Exception as e:
             logger.warning(f"Error extracting price: {e}")
