@@ -583,6 +583,12 @@ class PropertyScraper:
                 match = re.search(pattern, page_text)
                 if match:
                     address = match.group(1).strip()
+                    # Remove any trailing quotes or punctuation
+                    address = address.rstrip('"\'.,;:')
+                    # Remove HTML entities
+                    address = address.replace('&quot;', '"').replace('&apos;', "'")
+                    # Clean up any remaining quote issues
+                    address = address.strip('"\'')
                     if len(address) > 5 and len(address) < 200:  # Reasonable address length
                         logger.debug(f"[SCRAPER] Found property address: {address}")
                         return address
@@ -598,6 +604,9 @@ class PropertyScraper:
                 match = re.search(pattern, page_html, re.IGNORECASE)
                 if match:
                     text = match.group(1).strip()
+                    # Remove HTML entities and clean quotes
+                    text = text.replace('&quot;', '"').replace('&apos;', "'")
+                    text = text.strip('"\'')
                     # Check if it looks like an address
                     if re.search(r'\d+\s+[A-Z]', text) and len(text) < 200:
                         logger.debug(f"[SCRAPER] Found property address in title: {text}")
@@ -614,57 +623,90 @@ class PropertyScraper:
         Looks for the main listing title, avoiding generic labels like "Listing Description".
         """
         try:
-            # Pattern 1: Look for h1 tags, but exclude generic ones
+            # Pattern 1: Look for h1 tags, but exclude generic ones and addresses
             h1_pattern = r'<h1[^>]*>([^<]+)</h1>'
             h1_matches = re.finditer(h1_pattern, page_html, re.IGNORECASE)
             for match in h1_matches:
                 title = match.group(1).strip()
+                # Clean HTML entities
+                title = title.replace('&quot;', '"').replace('&apos;', "'").replace('&amp;', '&')
+                title = title.strip('"\'')
                 # Skip generic labels
-                generic_labels = ['listing description', 'property details', 'description', 'overview']
+                generic_labels = ['listing description', 'property details', 'description', 'overview', 'information to help']
                 if any(label in title.lower() for label in generic_labels):
                     continue
                 # Filter out addresses (they usually start with numbers)
                 if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 5 and len(title) < 300:
-                    logger.debug(f"[SCRAPER] Found property title from h1: {title}")
-                    return title
+                    # Skip if it looks like a date or other metadata
+                    if not re.search(r'^(listed|mon|tue|wed|thu|fri|sat|sun|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)', title.lower()):
+                        logger.debug(f"[SCRAPER] Found property title from h1: {title}")
+                        return title
             
             # Pattern 2: Look for title in specific data attributes or classes
             # TradeMe often uses data attributes for the main title
             title_selectors = [
                 r'<[^>]*data-testid="listing-title"[^>]*>([^<]+)</',
+                r'<[^>]*class="[^"]*listing-title[^"]*"[^>]*>([^<]{5,200})</',
                 r'<[^>]*class="[^"]*title[^"]*"[^>]*>([^<]{10,200})</',
                 r'<[^>]*itemprop="name"[^>]*>([^<]+)</',
             ]
             
             for pattern in title_selectors:
-                match = re.search(pattern, page_html, re.IGNORECASE)
-                if match:
+                matches = re.finditer(pattern, page_html, re.IGNORECASE)
+                for match in matches:
                     title = match.group(1).strip()
+                    # Clean HTML entities
+                    title = title.replace('&quot;', '"').replace('&apos;', "'").replace('&amp;', '&')
+                    title = title.strip('"\'')
                     # Skip generic labels
-                    generic_labels = ['listing description', 'property details', 'description']
+                    generic_labels = ['listing description', 'property details', 'description', 'information to help', 'research the market']
                     if any(label in title.lower() for label in generic_labels):
                         continue
-                    if not re.search(r'^\d+\s+[A-Z]', title) and len(title) > 5 and len(title) < 300:
-                        logger.debug(f"[SCRAPER] Found property title from selector: {title}")
-                        return title
+                    # Skip addresses and dates
+                    if not re.search(r'^\d+\s+[A-Z]', title) and not re.search(r'^(listed|mon|tue|wed|thu|fri|sat|sun)', title.lower()):
+                        if len(title) > 5 and len(title) < 300:
+                            logger.debug(f"[SCRAPER] Found property title from selector: {title}")
+                            return title
             
             # Pattern 3: Look for bold/large text near the address (main title is usually prominent)
             # Find address first, then look for text before it
             address_match = re.search(r'(\d+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s+(?:Street|St|Road|Rd|Avenue|Ave|Lane|Ln|Drive|Dr|Way|Place|Pl|Terrace|Tce|Court|Ct|Grove|Gv|Close|Cl|Crescent|Cres|Boulevard|Blvd|Parade|Pde|Highway|Hwy|Mall|Circle|Cir))', page_text)
             if address_match:
                 address_pos = address_match.start()
-                # Look for text before the address (within 500 chars)
-                text_before = page_text[max(0, address_pos - 500):address_pos]
-                # Find lines that look like titles (not addresses, not generic labels)
+                # Look for text before the address (within 800 chars to catch the title)
+                text_before = page_text[max(0, address_pos - 800):address_pos]
+                # Split by newlines and check each line
                 lines = text_before.split('\n')
                 for line in reversed(lines):  # Check from closest to address
                     line = line.strip()
+                    # Look for lines that are substantial and look like titles
                     if len(line) > 10 and len(line) < 300:
-                        generic_labels = ['listing description', 'property details', 'description', 'overview', 'listed:', 'price']
+                        generic_labels = ['listing description', 'property details', 'description', 'overview', 'listed:', 'price', 'information to help', 'research the market']
                         if not any(label in line.lower() for label in generic_labels):
-                            if not re.search(r'^\d+\s+[A-Z]', line):
-                                logger.debug(f"[SCRAPER] Found property title before address: {line}")
-                                return line
+                            # Skip addresses, dates, and prices
+                            if not re.search(r'^\d+\s+[A-Z]', line) and not re.search(r'^(listed|mon|tue|wed|thu|fri|sat|sun|price)', line.lower()):
+                                # Check if it has some capitalization (titles usually do)
+                                if re.search(r'[A-Z]', line):
+                                    logger.debug(f"[SCRAPER] Found property title before address: {line}")
+                                    return line
+            
+            # Pattern 4: Look for text between "Listed:" and address (title is usually there)
+            listed_match = re.search(r'listed:\s*[^,\n]+', page_text, re.IGNORECASE)
+            if listed_match and address_match:
+                listed_end = listed_match.end()
+                address_start = address_match.start()
+                if address_start > listed_end:
+                    text_between = page_text[listed_end:address_start].strip()
+                    # Split by newlines and find the most prominent line
+                    lines = text_between.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if len(line) > 10 and len(line) < 300:
+                            generic_labels = ['listing description', 'property details', 'description', 'information']
+                            if not any(label in line.lower() for label in generic_labels):
+                                if not re.search(r'^\d+\s+[A-Z]', line) and re.search(r'[A-Z]', line):
+                                    logger.debug(f"[SCRAPER] Found property title between Listed and address: {line}")
+                                    return line
             
         except Exception as e:
             logger.warning(f"Error extracting property title: {e}")
