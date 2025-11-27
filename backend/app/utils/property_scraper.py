@@ -617,6 +617,233 @@ class PropertyScraper:
         
         return None
     
+    def _extract_title_from_dom_sync(self, page) -> Optional[str]:
+        """
+        Extract title using Playwright DOM queries (more reliable than regex).
+        Looks for the main listing title element that appears between "Listed:" and address.
+        """
+        try:
+            # Use JavaScript to find the title element
+            # The title is the large bold text between "Listed:" and the address
+            title_script = """
+            (() => {
+                // Strategy: Find "Listed:" element, then find the next prominent text element
+                // that's not an address and not a price
+                
+                // Find all text nodes and elements
+                const allElements = Array.from(document.querySelectorAll('*'));
+                
+                // Find the "Listed:" element
+                let listedElement = null;
+                for (const el of allElements) {
+                    const text = el.textContent || '';
+                    if (text.match(/^listed:/i)) {
+                        listedElement = el;
+                        break;
+                    }
+                }
+                
+                if (!listedElement) {
+                    // Try to find by partial match
+                    for (const el of allElements) {
+                        const text = el.textContent || '';
+                        if (text.toLowerCase().includes('listed:')) {
+                            listedElement = el;
+                            break;
+                        }
+                    }
+                }
+                
+                if (listedElement) {
+                    // Walk through siblings and children to find the title
+                    // Title is usually the next prominent element after "Listed:"
+                    let current = listedElement.parentElement;
+                    let foundListed = false;
+                    let candidates = [];
+                    
+                    // Look for h1, h2, or large text elements in the same container
+                    const container = listedElement.closest('div, section, article, main') || document.body;
+                    const allInContainer = Array.from(container.querySelectorAll('h1, h2, h3, [class*="title"], [class*="heading"], div, span, p'));
+                    
+                    for (const el of allInContainer) {
+                        const text = (el.textContent || '').trim();
+                        if (!text || text.length < 5 || text.length > 300) continue;
+                        
+                        const lower = text.toLowerCase();
+                        
+                        // Skip if it's the "Listed:" text itself
+                        if (lower.includes('listed:')) {
+                            foundListed = true;
+                            continue;
+                        }
+                        
+                        // After finding "Listed:", look for the title
+                        if (foundListed) {
+                            // Skip addresses (start with numbers)
+                            if (/^\\d+\\s+[A-Z]/.test(text)) {
+                                break; // Address found, stop looking
+                            }
+                            
+                            // Skip prices
+                            if (lower.includes('price') || lower.includes('negotiation') || 
+                                lower.includes('auction') || lower.includes('tender')) {
+                                continue;
+                            }
+                            
+                            // Skip generic labels
+                            if (lower.includes('listing description') || 
+                                lower.includes('property details') || 
+                                lower.includes('description') ||
+                                lower.includes('information')) {
+                                continue;
+                            }
+                            
+                            // Skip dates
+                            if (/^(mon|tue|wed|thu|fri|sat|sun|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)/i.test(text)) {
+                                continue;
+                            }
+                            
+                            // This could be the title - check if it has capitalization
+                            if (/[A-Z]/.test(text)) {
+                                candidates.push({text: text, element: el});
+                            }
+                        }
+                    }
+                    
+                    // Return the first candidate (should be the title)
+                    if (candidates.length > 0) {
+                        return candidates[0].text;
+                    }
+                }
+                
+                // Fallback: Look for h1 that's not generic
+                const h1s = Array.from(document.querySelectorAll('h1'));
+                for (const h1 of h1s) {
+                    const text = h1.textContent.trim();
+                    if (text.length > 5 && text.length < 300) {
+                        const lower = text.toLowerCase();
+                        if (!lower.includes('listing description') && 
+                            !lower.includes('property details') &&
+                            !lower.includes('description') &&
+                            !lower.includes('information') &&
+                            !lower.includes('price') &&
+                            !lower.includes('negotiation') &&
+                            !/^\\d+\\s+[A-Z]/.test(text)) {
+                            return text;
+                        }
+                    }
+                }
+                
+                return null;
+            })()
+            """
+            
+            title = page.evaluate(title_script)
+            if title:
+                # Clean up the title
+                title = title.strip()
+                title = title.replace('&quot;', '"').replace('&apos;', "'").replace('&amp;', '&')
+                title = title.strip('"\'')
+                logger.debug(f"[SCRAPER] Extracted title from DOM: {title}")
+                return title
+            
+        except Exception as e:
+            logger.warning(f"Error extracting title from DOM: {e}")
+        
+        return None
+    
+    async def _extract_title_from_dom_async(self, page) -> Optional[str]:
+        """
+        Extract title using Playwright DOM queries (async version).
+        Looks for the main listing title element that appears between "Listed:" and address.
+        """
+        try:
+            # Same logic as sync version but using async page.evaluate
+            title_script = """
+            (() => {
+                // Strategy: Find "Listed:" element, then find the next prominent text element
+                const allElements = Array.from(document.querySelectorAll('*'));
+                
+                let listedElement = null;
+                for (const el of allElements) {
+                    const text = el.textContent || '';
+                    if (text.match(/^listed:/i) || text.toLowerCase().includes('listed:')) {
+                        listedElement = el;
+                        break;
+                    }
+                }
+                
+                if (listedElement) {
+                    const container = listedElement.closest('div, section, article, main') || document.body;
+                    const allInContainer = Array.from(container.querySelectorAll('h1, h2, h3, [class*="title"], [class*="heading"], div, span, p'));
+                    
+                    let foundListed = false;
+                    let candidates = [];
+                    
+                    for (const el of allInContainer) {
+                        const text = (el.textContent || '').trim();
+                        if (!text || text.length < 5 || text.length > 300) continue;
+                        
+                        const lower = text.toLowerCase();
+                        
+                        if (lower.includes('listed:')) {
+                            foundListed = true;
+                            continue;
+                        }
+                        
+                        if (foundListed) {
+                            if (/^\\d+\\s+[A-Z]/.test(text)) break;
+                            if (lower.includes('price') || lower.includes('negotiation') || 
+                                lower.includes('auction') || lower.includes('tender')) continue;
+                            if (lower.includes('listing description') || lower.includes('property details') || 
+                                lower.includes('description') || lower.includes('information')) continue;
+                            if (/^(mon|tue|wed|thu|fri|sat|sun|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)/i.test(text)) continue;
+                            if (/[A-Z]/.test(text)) {
+                                candidates.push({text: text, element: el});
+                            }
+                        }
+                    }
+                    
+                    if (candidates.length > 0) {
+                        return candidates[0].text;
+                    }
+                }
+                
+                // Fallback: Look for h1
+                const h1s = Array.from(document.querySelectorAll('h1'));
+                for (const h1 of h1s) {
+                    const text = h1.textContent.trim();
+                    if (text.length > 5 && text.length < 300) {
+                        const lower = text.toLowerCase();
+                        if (!lower.includes('listing description') && 
+                            !lower.includes('property details') &&
+                            !lower.includes('description') &&
+                            !lower.includes('information') &&
+                            !lower.includes('price') &&
+                            !lower.includes('negotiation') &&
+                            !/^\\d+\\s+[A-Z]/.test(text)) {
+                            return text;
+                        }
+                    }
+                }
+                
+                return null;
+            })()
+            """
+            
+            title = await page.evaluate(title_script)
+            if title:
+                title = title.strip()
+                title = title.replace('&quot;', '"').replace('&apos;', "'").replace('&amp;', '&')
+                title = title.strip('"\'')
+                logger.debug(f"[SCRAPER] Extracted title from DOM (async): {title}")
+                return title
+            
+        except Exception as e:
+            logger.warning(f"Error extracting title from DOM (async): {e}")
+        
+        return None
+    
     def _extract_property_title(self, page_html: str, page_text: str) -> Optional[str]:
         """
         Extract property title/description from page.
@@ -692,13 +919,15 @@ class PropertyScraper:
             
             # Pattern 4: Look for text between "Listed:" and address (title is usually there)
             # This is the most reliable pattern - title appears between date and address
+            # IMPORTANT: Title comes BEFORE address, price comes AFTER address
             listed_match = re.search(r'listed:\s*[^,\n]+', page_text, re.IGNORECASE)
             if listed_match and address_match:
                 listed_end = listed_match.end()
                 address_start = address_match.start()
                 if address_start > listed_end:
                     text_between = page_text[listed_end:address_start].strip()
-                    # Split by newlines and find the most prominent line (usually the first substantial line)
+                    logger.debug(f"[SCRAPER] Text between Listed and address: {text_between[:200]}")
+                    # Split by newlines and find the FIRST substantial line (title is first, before address)
                     lines = text_between.split('\n')
                     for line in lines:
                         line = line.strip()
@@ -708,22 +937,25 @@ class PropertyScraper:
                         # Skip if it's too short or too long
                         if len(line) < 5 or len(line) > 300:
                             continue
-                        # Exclude price-related text
-                        price_keywords = ['price', 'negotiation', 'auction', 'tender', 'deadline', 'sale', 'poa', 'on application']
-                        if any(keyword in line.lower() for keyword in price_keywords):
+                        # STRICT: Exclude ANY line containing price-related keywords
+                        price_keywords = ['price', 'negotiation', 'auction', 'tender', 'deadline', 'poa', 'on application', 'by negotiation', 'contact agent']
+                        line_lower = line.lower()
+                        if any(keyword in line_lower for keyword in price_keywords):
+                            logger.debug(f"[SCRAPER] Skipping line with price keyword: {line}")
                             continue
                         # Exclude generic labels
-                        generic_labels = ['listing description', 'property details', 'description', 'information', 'research']
-                        if any(label in line.lower() for label in generic_labels):
+                        generic_labels = ['listing description', 'property details', 'description', 'information', 'research', 'help you']
+                        if any(label in line_lower for label in generic_labels):
                             continue
                         # Skip addresses (start with numbers)
                         if re.search(r'^\d+\s+[A-Z]', line):
                             continue
                         # Skip dates
-                        if re.search(r'^(listed|mon|tue|wed|thu|fri|sat|sun|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)', line.lower()):
+                        if re.search(r'^(listed|mon|tue|wed|thu|fri|sat|sun|nov|dec|jan|feb|mar|apr|may|jun|jul|aug|sep|oct)', line_lower):
                             continue
                         # Must have some capitalization (titles usually do)
                         if re.search(r'[A-Z]', line):
+                            # This should be the title - it's the first substantial line between Listed and address
                             logger.debug(f"[SCRAPER] Found property title between Listed and address: {line}")
                             return line
             
@@ -1008,7 +1240,13 @@ class PropertyScraper:
                     # Extract property details: address, title, price, bedrooms, bathrooms, area
                     logger.info(f"[SCRAPER SYNC] Extracting property details...")
                     result.property_address = self._extract_property_address(page_html, page_text)
-                    result.property_title = self._extract_property_title(page_html, page_text)
+                    # Try Playwright DOM query first for title (more reliable)
+                    title_from_dom = self._extract_title_from_dom_sync(page)
+                    if title_from_dom:
+                        result.property_title = title_from_dom
+                        logger.info(f"[SCRAPER SYNC] Found title from DOM: {title_from_dom}")
+                    else:
+                        result.property_title = self._extract_property_title(page_html, page_text)
                     result.price = self._extract_price(page_html, page_text)
                     result.bedrooms = self._extract_bedrooms(page_html, page_text)
                     result.bathrooms = self._extract_bathrooms(page_html, page_text)
@@ -1948,7 +2186,17 @@ class PropertyScraper:
                 # Extract property details: address, title, price, bedrooms, bathrooms, area
                 logger.info(f"[SCRAPER] Extracting property details...")
                 result.property_address = self._extract_property_address(page_html, page_text)
-                result.property_title = self._extract_property_title(page_html, page_text)
+                # Try Playwright DOM query first for title (more reliable)
+                try:
+                    title_from_dom = await self._extract_title_from_dom_async(page)
+                    if title_from_dom:
+                        result.property_title = title_from_dom
+                        logger.info(f"[SCRAPER] Found title from DOM: {title_from_dom}")
+                    else:
+                        result.property_title = self._extract_property_title(page_html, page_text)
+                except Exception as e:
+                    logger.warning(f"Error in DOM title extraction, falling back to text: {e}")
+                    result.property_title = self._extract_property_title(page_html, page_text)
                 result.price = self._extract_price(page_html, page_text)
                 result.bedrooms = self._extract_bedrooms(page_html, page_text)
                 result.bathrooms = self._extract_bathrooms(page_html, page_text)
